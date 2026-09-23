@@ -71,7 +71,8 @@ struct CameraApp {
     frames: u64,
     dropped_estimate: u64,
     show_stats: bool,
-    active_section: u8,
+    ar_enabled: bool,
+    virtual_webcam: bool,
     last_process_ms: f32,
 }
 
@@ -94,7 +95,8 @@ impl CameraApp {
             frames: 0,
             dropped_estimate: 0,
             show_stats: true,
-            active_section: 0,
+            ar_enabled: false,
+            virtual_webcam: false,
             last_process_ms: 0.0,
         }
     }
@@ -197,6 +199,11 @@ impl eframe::App for CameraApp {
                 ui.checkbox(&mut self.compare, "A/B compare");
                 ui.checkbox(&mut self.frozen, "Freeze");
                 ui.checkbox(&mut self.show_stats, "Stats");
+                ui.separator();
+                if ui.button(if self.virtual_webcam { "Virtual Webcam: ON" } else { "Enable Virtual Webcam" }).clicked() {
+                    self.virtual_webcam = !self.virtual_webcam;
+                    self.error = Some("Virtual webcam integration requires the Windows 11 Media Foundation virtual-camera component; this button is reserved for the system camera bridge.".to_owned());
+                }
             });
         });
 
@@ -262,13 +269,16 @@ impl eframe::App for CameraApp {
                 );
 
                 ui.horizontal(|ui| {
-                    if ui.button("Reset").clicked() {
-                        self.tuning = Tuning::default();
-                    }
-                    if ui.button("Neutral").clicked() {
-                        self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() };
+                    if ui.button("Reset").clicked() { self.tuning = Tuning::default(); }
+                    if ui.button("Neutral").clicked() { self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() }; }
+                    if ui.button("Auto Tune").clicked() {
+                        if let Some(pair) = &self.pair { self.tuning = auto_tune(&pair.raw); }
                     }
                 });
+                ui.separator();
+                ui.heading("Augmented reality");
+                ui.checkbox(&mut self.ar_enabled, "Face AR overlay");
+                ui.small("Prepared for native face landmarks and glTF overlays; tracker integration is kept separate from the low-latency image path.");
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
@@ -289,6 +299,7 @@ impl eframe::App for CameraApp {
                 ui.collapsing("AI detail", |ui| {
                     ui.label("AI enhancement is intentionally disabled in the live 4K path until an ONNX/DirectML backend is benchmarked.");
                     ui.small("Planned: lightweight tiled inference with a latency guard, rather than forcing a heavy model over every 4K frame.");
+                    ui.small("AR direction: MindAR-style face tracking with glTF assets adapted to the native Windows pipeline.");
                 });
 
                 if let Some(err) = &self.error {
@@ -332,83 +343,86 @@ impl eframe::App for CameraApp {
     }
 }
 
+fn auto_tune(src: &RgbImage) -> Tuning {
+    let mut sum = 0.0f64;
+    let mut r_sum = 0.0f64;
+    let mut b_sum = 0.0f64;
+    let mut count = 0u64;
+    for p in src.as_raw().chunks_exact(3) {
+        let r = p[0] as f64 / 255.0;
+        let g = p[1] as f64 / 255.0;
+        let b = p[2] as f64 / 255.0;
+        sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        r_sum += r;
+        b_sum += b;
+        count += 1;
+    }
+    if count == 0 { return Tuning::default(); }
+    let mean = (sum / count as f64) as f32;
+    let r_mean = (r_sum / count as f64) as f32;
+    let b_mean = (b_sum / count as f64) as f32;
+    Tuning {
+        exposure: ((0.46 - mean) * 2.0).clamp(-0.7, 0.7),
+        contrast: (1.10 + (0.46 - mean).abs() * 0.35).clamp(0.95, 1.25),
+        saturation: 1.04,
+        sharpness: 0.30,
+        denoise: 0.12,
+        warmth: ((r_mean - b_mean) * -0.8).clamp(-0.25, 0.25),
+        highlight_recovery: 0.28,
+        shadow_lift: ((0.40 - mean) * 0.30).clamp(0.02, 0.16),
+    }
+}
+
 fn enhance(src: &RgbImage, t: &Tuning) -> RgbImage {
-    let mut out = src.clone();
     let width = src.width() as usize;
     let height = src.height() as usize;
-
-    out.as_mut()
-        .par_chunks_mut(3)
-        .enumerate()
-        .for_each(|(i, p)| {
+    let mut out = src.clone();
+    let input = src.as_raw();
+    let output = out.as_mut();
+    let exposure = 2.0_f32.powf(t.exposure);
+    output.par_chunks_mut(3).enumerate().for_each(|(i, p)| {
+        let j = i * 3;
+        let mut r = input[j] as f32 / 255.0 * exposure;
+        let mut g = input[j + 1] as f32 / 255.0 * exposure;
+        let mut b = input[j + 2] as f32 / 255.0 * exposure;
+        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let shadow = (1.0 - lum).powi(2) * t.shadow_lift;
+        let highlight = lum.powi(2) * t.highlight_recovery;
+        r += shadow - highlight * r * 0.45;
+        g += shadow - highlight * g * 0.45;
+        b += shadow - highlight * b * 0.45;
+        r = (r - 0.5) * t.contrast + 0.5 + t.warmth * 0.06;
+        g = (g - 0.5) * t.contrast + 0.5;
+        b = (b - 0.5) * t.contrast + 0.5 - t.warmth * 0.06;
+        let lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        r = lum2 + (r - lum2) * t.saturation;
+        g = lum2 + (g - lum2) * t.saturation;
+        b = lum2 + (b - lum2) * t.saturation;
+        p[0] = (r.clamp(0.0, 1.0) * 255.0) as u8;
+        p[1] = (g.clamp(0.0, 1.0) * 255.0) as u8;
+        p[2] = (b.clamp(0.0, 1.0) * 255.0) as u8;
+    });
+    if width >= 3 && height >= 3 && (t.sharpness > 0.0 || t.denoise > 0.0) {
+        let original = out.clone();
+        let src_buf = original.as_raw();
+        out.as_mut().par_chunks_mut(3).enumerate().for_each(|(i, p)| {
             let x = i % width;
             let y = i / width;
-            let s = src.get_pixel(x as u32, y as u32);
-
-            let mut r = s[0] as f32 / 255.0;
-            let mut g = s[1] as f32 / 255.0;
-            let mut b = s[2] as f32 / 255.0;
-
-            let exposure = 2.0_f32.powf(t.exposure);
-            r *= exposure;
-            g *= exposure;
-            b *= exposure;
-
-            let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            let shadow = (1.0 - lum).powi(2) * t.shadow_lift;
-            let highlight = lum.max(0.0).powi(2) * t.highlight_recovery;
-
-            r += shadow - highlight * r * 0.45;
-            g += shadow - highlight * g * 0.45;
-            b += shadow - highlight * b * 0.45;
-
-            r = (r - 0.5) * t.contrast + 0.5;
-            g = (g - 0.5) * t.contrast + 0.5;
-            b = (b - 0.5) * t.contrast + 0.5;
-
-            let lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            r = lum2 + (r - lum2) * t.saturation;
-            g = lum2 + (g - lum2) * t.saturation;
-            b = lum2 + (b - lum2) * t.saturation;
-
-            r += t.warmth * 0.06;
-            b -= t.warmth * 0.06;
-
-            p[0] = (r.clamp(0.0, 1.0) * 255.0) as u8;
-            p[1] = (g.clamp(0.0, 1.0) * 255.0) as u8;
-            p[2] = (b.clamp(0.0, 1.0) * 255.0) as u8;
+            if x == 0 || y == 0 || x + 1 >= width || y + 1 >= height { return; }
+            let idx = (y * width + x) * 3;
+            let north = idx - width * 3;
+            let south = idx + width * 3;
+            let west = idx - 3;
+            let east = idx + 3;
+            for k in 0..3 {
+                let center = src_buf[idx + k] as f32;
+                let avg = (src_buf[north + k] as f32 + src_buf[south + k] as f32 + src_buf[west + k] as f32 + src_buf[east + k] as f32) * 0.25;
+                let detail = center - avg;
+                let denoised = center * (1.0 - t.denoise) + avg * t.denoise;
+                p[k] = (denoised + detail * t.sharpness).clamp(0.0, 255.0) as u8;
+            }
         });
-
-    let original = out.clone();
-
-    if width >= 3 && height >= 3 {
-        out.as_mut()
-            .par_chunks_mut(3)
-            .enumerate()
-            .for_each(|(i, p)| {
-                let x = i % width;
-                let y = i / width;
-                if x == 0 || y == 0 || x + 1 >= width || y + 1 >= height {
-                    return;
-                }
-
-                let c = original.get_pixel(x as u32, y as u32);
-                let n = original.get_pixel(x as u32, (y - 1) as u32);
-                let s = original.get_pixel(x as u32, (y + 1) as u32);
-                let w = original.get_pixel((x - 1) as u32, y as u32);
-                let e = original.get_pixel((x + 1) as u32, y as u32);
-
-                for k in 0..3 {
-                    let center = c[k] as f32;
-                    let avg =
-                        (n[k] as f32 + s[k] as f32 + w[k] as f32 + e[k] as f32) * 0.25;
-                    let detail = center - avg;
-                    let denoised = center * (1.0 - t.denoise) + avg * t.denoise;
-                    p[k] = (denoised + detail * t.sharpness).clamp(0.0, 255.0) as u8;
-                }
-            });
     }
-
     out
 }
 
