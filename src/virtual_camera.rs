@@ -16,8 +16,8 @@ const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const STRIDE: u32 = WIDTH * 4;
 const BYTES: usize = (STRIDE * HEIGHT) as usize;
-const MAPPING: &[u16] = &['L' as u16, 'o' as u16, 'c' as u16, 'a' as u16, 'l' as u16, '\\' as u16, '4' as u16, 'K' as u16, 'R' as u16, 'u' as u16, 's' as u16, 't' as u16, 'C' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'r' as u16, 'a' as u16, 'F' as u16, 'r' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'R' as u16, 'i' as u16, 'n' as u16, 'g' as u16, 0];
-const MUTEX: &[u16] = &['L' as u16, 'o' as u16, 'c' as u16, 'a' as u16, 'l' as u16, '\\' as u16, '4' as u16, 'K' as u16, 'R' as u16, 'u' as u16, 's' as u16, 't' as u16, 'C' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'r' as u16, 'a' as u16, 'F' as u16, 'r' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'R' as u16, 'i' as u16, 'n' as u16, 'g' as u16, 'M' as u16, 'u' as u16, 't' as u16, 'e' as u16, 'x' as u16, 0];
+const MAPPING: &[u16] = &['G' as u16, 'l' as u16, 'o' as u16, 'b' as u16, 'a' as u16, 'l' as u16, '\\' as u16, '4' as u16, 'K' as u16, 'R' as u16, 'u' as u16, 's' as u16, 't' as u16, 'C' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'r' as u16, 'a' as u16, 'F' as u16, 'r' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'R' as u16, 'i' as u16, 'n' as u16, 'g' as u16, 0];
+const MUTEX: &[u16] = &['G' as u16, 'l' as u16, 'o' as u16, 'b' as u16, 'a' as u16, 'l' as u16, '\\' as u16, '4' as u16, 'K' as u16, 'R' as u16, 'u' as u16, 's' as u16, 't' as u16, 'C' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'r' as u16, 'a' as u16, 'F' as u16, 'r' as u16, 'a' as u16, 'm' as u16, 'e' as u16, 'R' as u16, 'i' as u16, 'n' as u16, 'g' as u16, 'M' as u16, 'u' as u16, 't' as u16, 'e' as u16, 'x' as u16, 0];
 
 #[repr(C)]
 struct FrameHeader {
