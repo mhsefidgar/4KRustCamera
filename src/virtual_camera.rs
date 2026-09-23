@@ -7,11 +7,11 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, FreeLibrary, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
     System::{
         LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH},
-        Memory::{CreateFileMappingW, LocalFree, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
+        Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
         Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
     },
-    Security::{SECURITY_ATTRIBUTES, Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1}},
+    Security::{SECURITY_ATTRIBUTES, Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, LocalFree, SDDL_REVISION_1}},
 };
 
 const WIDTH: u32 = 3840;
