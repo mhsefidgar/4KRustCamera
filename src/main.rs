@@ -413,7 +413,7 @@ fn enhance(src: &RgbImage, t: &Tuning) -> RgbImage {
 }
 
 fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Result<()> {
-    let cameras = nokhwa::query(nokhwa::native_api_backend())?;
+    let cameras = nokhwa::query(nokhwa::native_api_backend().ok_or_else(|| anyhow::anyhow!("No camera backend is available on this system."))?)?;
     let mut available = Vec::new();
     for info in cameras {
         available.push((info.index().clone(), info.human_name()));
