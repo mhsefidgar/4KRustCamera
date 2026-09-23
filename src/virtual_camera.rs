@@ -7,7 +7,7 @@ use windows_sys::Win32::{
     System::{
         LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH},
         Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
-        Performance::QueryPerformanceCounter,
+        Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
     },
 };
@@ -40,6 +40,7 @@ pub struct VirtualCameraPublisher {
     mutex: HANDLE,
     ring: *mut FrameRing,
     sequence: u64,
+    qpc_frequency: i64,
 }
 unsafe impl Send for VirtualCameraPublisher {}
 unsafe impl Sync for VirtualCameraPublisher {}
@@ -64,7 +65,13 @@ impl VirtualCameraPublisher {
             unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: ring as *mut _ }); CloseHandle(mapping); }
             anyhow::bail!("CreateMutexW failed: {}", unsafe { GetLastError() });
         }
-        Ok(Self { mapping, mutex, ring, sequence: 0 })
+        let mut qpc_frequency = 0i64;
+        unsafe { QueryPerformanceFrequency(&mut qpc_frequency); }
+        if qpc_frequency <= 0 {
+            unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: ring as *mut _ }); CloseHandle(mutex); CloseHandle(mapping); }
+            anyhow::bail!("QueryPerformanceFrequency failed");
+        }
+        Ok(Self { mapping, mutex, ring, sequence: 0, qpc_frequency })
     }
 
     pub fn publish(&mut self, rgb: &RgbImage) -> Result<()> {
@@ -81,7 +88,7 @@ impl VirtualCameraPublisher {
             (*self.ring).header.reserved = 0;
             let mut qpc = 0i64;
             QueryPerformanceCounter(&mut qpc);
-            (*self.ring).header.timestamp100ns = qpc.max(0) as u64;
+            (*self.ring).header.timestamp100ns = ((qpc.max(0) as i128) * 10_000_000i128 / self.qpc_frequency as i128) as u64;
             let dst = slice::from_raw_parts_mut((*self.ring).pixels.as_mut_ptr(), BYTES);
             for y in 0..HEIGHT as usize {
                 let src = &frame.as_raw()[(y * WIDTH as usize * 3)..((y + 1) * WIDTH as usize * 3)];
