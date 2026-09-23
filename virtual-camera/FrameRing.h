@@ -6,8 +6,8 @@ constexpr uint32_t VC_WIDTH = 1280;
 constexpr uint32_t VC_HEIGHT = 720;
 constexpr uint32_t VC_STRIDE = VC_WIDTH * 4;
 constexpr uint32_t VC_BYTES = VC_STRIDE * VC_HEIGHT;
-constexpr wchar_t VC_MAPPING_NAME[] = L"Local\\4KRustCameraFrameRing";
-constexpr wchar_t VC_MUTEX_NAME[] = L"Local\\4KRustCameraFrameRingMutex";
+constexpr wchar_t VC_MAPPING_NAME[] = L"Global\\4KRustCameraFrameRing";
+constexpr wchar_t VC_MUTEX_NAME[] = L"Global\\4KRustCameraFrameRingMutex";
 
 struct FrameHeader {
     uint64_t sequence;
