@@ -8,7 +8,7 @@ use windows_sys::Win32::{
         LibraryLoader::{GetProcAddress, LoadLibraryW},
         Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
         Performance::QueryPerformanceCounter,
-        Threading::{ReleaseMutex, WaitForSingleObject},
+        Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
     },
 };
 
