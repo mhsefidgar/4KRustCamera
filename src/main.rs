@@ -186,7 +186,8 @@ impl CameraApp {
                 self.last_auto_tune = Instant::now();
             }
             let start = Instant::now();
-            let enhanced = enhance(&raw, &self.tuning);
+            let mut enhanced = enhance(&raw, &self.tuning);
+            if self.ar_enabled && self.ar_object != 0 { for (x,y,w,h,_score) in &self.face_boxes { draw_ar_object_image(&mut enhanced, *x,*y,*w,*h,self.ar_object,self.ar_scale); } }
             #[cfg(windows)]
             if self.virtual_webcam {
                 if let Some(publisher) = &mut self.virtual_camera_publisher {
@@ -610,6 +611,17 @@ fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: 
     }
 }
 
+fn draw_ar_object_image(img: &mut RgbImage, x:f32,y:f32,w:f32,h:f32,object:usize,scale:f32) {
+    fn px(img:&mut RgbImage,x:i32,y:i32){ if x>=0 && y>=0 && (x as u32)<img.width() && (y as u32)<img.height(){ img.put_pixel(x as u32,y as u32,image::Rgb([255,255,255])); } }
+    fn line(img:&mut RgbImage,mut x0:i32,mut y0:i32,x1:i32,y1:i32){ let dx=(x1-x0).abs(); let sx=if x0<x1{1}else{-1}; let dy=-(y1-y0).abs(); let sy=if y0<y1{1}else{-1}; let mut e=dx+dy; loop{ px(img,x0,y0); if x0==x1&&y0==y1{break;} let e2=2*e; if e2>=dy{e+=dy;x0+=sx;} if e2<=dx{e+=dx;y0+=sy;} } }
+    let cx=x+w*0.5; let cy=y+h*0.45; let s=scale.clamp(0.5,1.8); let ww=w*s; let hh=h*s;
+    match object {
+      1 => { let lw=ww*0.27; let lh=hh*0.13; let gap=ww*0.045; let l=(cx-lw-gap,cy); let r=(cx+lw+gap,cy); for &(a,b,c,d) in &[(l.0-lw,l.1-lh,l.0,l.1-lh),(l.0,l.1-lh,l.0,l.1+lh),(l.0,l.1+lh,l.0-lw,l.1+lh),(r.0,r.1-lh,r.0+lw,r.1-lh),(r.0+lw,r.1-lh,r.0+lw,r.1+lh),(r.0+lw,r.1+lh,r.0,r.1+lh)] { line(img,a as i32,b as i32,c as i32,d as i32); } line(img,l.0 as i32,cy as i32,r.0 as i32,cy as i32); }
+      2 => { let base=cy-hh*0.38; let p=[(cx-ww*.40,base),(cx-ww*.25,base-hh*.24),(cx-ww*.08,base),(cx+ww*.08,base-hh*.31),(cx+ww*.25,base),(cx+ww*.40,base-hh*.20),(cx+ww*.44,base)]; let d=(ww*.045,-hh*.07); for q in p.windows(2){line(img,q[0].0 as i32,q[0].1 as i32,q[1].0 as i32,q[1].1 as i32); line(img,(q[0].0+d.0) as i32,(q[0].1+d.1) as i32,(q[1].0+d.0) as i32,(q[1].1+d.1) as i32);} for &i in &[0usize,2,4,6]{line(img,p[i].0 as i32,p[i].1 as i32,(p[i].0+d.0) as i32,(p[i].1+d.1) as i32);} }
+      3 => { let q=ww.min(hh)*.18; let d=(q*.42,-q*.42); let p=[(cx-q,cy-q),(cx+q,cy-q),(cx+q,cy+q),(cx-q,cy+q)]; for i in 0..4{let a=p[i];let b=p[(i+1)%4];line(img,a.0 as i32,a.1 as i32,b.0 as i32,b.1 as i32);line(img,(a.0+d.0) as i32,(a.1+d.1) as i32,(b.0+d.0) as i32,(b.1+d.1) as i32);line(img,a.0 as i32,a.1 as i32,(a.0+d.0) as i32,(a.1+d.1) as i32);} }
+      _ => {}
+    }
+}
 fn auto_tune(src: &RgbImage) -> Tuning {
     let mut sum = 0.0f64;
     let mut r_sum = 0.0f64;
