@@ -8,7 +8,8 @@ use nokhwa::{
     Camera,
 };
 use rayon::prelude::*;
-use std::{thread, time::{Duration, Instant}};
+use std::{path::PathBuf, thread, time::{Duration, Instant}};
+use mediapipe::{FaceDetector, IouThreshold, Image as MpImage, ModelSource};
 
 #[derive(Clone, Debug)]
 struct Tuning {
@@ -74,6 +75,8 @@ struct CameraApp {
     ar_enabled: bool,
     virtual_webcam: bool,
     last_process_ms: f32,
+    face_boxes: Vec<(f32, f32, f32, f32, f32)>,
+    ar_status: String,
 }
 
 impl CameraApp {
@@ -98,6 +101,8 @@ impl CameraApp {
             ar_enabled: false,
             virtual_webcam: false,
             last_process_ms: 0.0,
+            face_boxes: Vec::new(),
+            ar_status: "AR off".to_owned(),
         }
     }
 
@@ -152,6 +157,15 @@ impl CameraApp {
             let start = Instant::now();
             let enhanced = enhance(&raw, &self.tuning);
             let process_ms = start.elapsed().as_secs_f32() * 1000.0;
+            if self.ar_enabled {
+                if let Some((boxes, status)) = run_face_ai(&raw) {
+                    self.face_boxes = boxes;
+                    self.ar_status = status;
+                }
+            } else {
+                self.face_boxes.clear();
+                self.ar_status = "AR off".to_owned();
+            }
 
             let dt = self.last_frame.elapsed().as_secs_f32().max(0.001);
             let instant_fps = 1.0 / dt;
@@ -280,12 +294,16 @@ impl eframe::App for CameraApp {
                 ui.small("Auto Tune uses the current frame; run it again when lighting changes.");
                 ui.separator();
                 ui.heading("AR & virtual camera");
-                ui.checkbox(&mut self.ar_enabled, "Face AR overlay");
-                ui.small("AR uses a separate processing stage so the base camera path remains low-latency.");
-                ui.add_enabled_ui(false, |ui| {
-                    ui.button("Register 4K Rust Virtual Camera");
-                });
-                ui.small("Windows 11 virtual cameras require a registered Media Foundation media-source component; registration alone cannot stream this app's frames.");
+                if ui.checkbox(&mut self.ar_enabled, "Face AR overlay").changed() {
+                    if self.ar_enabled { self.ar_status = "Starting MediaPipe face detector…".to_owned(); }
+                    else { self.face_boxes.clear(); self.ar_status = "AR off".to_owned(); }
+                }
+                ui.label(format!("Status: {}", self.ar_status));
+                ui.small("MediaPipe BlazeFace runs on a reduced preview frame; the 4K enhancement path is not replaced.");
+                if ui.button("Register 4K Rust Virtual Camera").clicked() {
+                    self.error = Some("Virtual-camera registration still needs the Media Foundation custom media-source DLL. MFCreateVirtualCamera can register a source, but Windows will not invent the frame-producing COM component for this app.".to_owned());
+                }
+                ui.small("The control is active so the state is explicit. The remaining work is the Windows Media Foundation source component that supplies processed frames.");
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
@@ -333,7 +351,19 @@ impl eframe::App for CameraApp {
                     ui.label(egui::RichText::new("ENHANCED · REALTIME").strong());
                     let avail = ui.available_size();
                     let ratio = enhanced.size_vec2().y / enhanced.size_vec2().x;
-                    ui.image((enhanced.id(), egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.92))));
+                    let size = egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.92));
+                    let response = ui.image((enhanced.id(), size));
+                    if self.ar_enabled && !self.face_boxes.is_empty() {
+                        let rect = response.rect;
+                        let sx = rect.width() / enhanced.size_vec2().x.max(1.0);
+                        let sy = rect.height() / enhanced.size_vec2().y.max(1.0);
+                        let painter = ui.painter_at(rect);
+                        for (x, y, w, h, score) in &self.face_boxes {
+                            let r = egui::Rect::from_min_size(rect.min + egui::vec2(*x * sx, *y * sy), egui::vec2(*w * sx, *h * sy));
+                            painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
+                            painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE {:.0}%", score * 100.0), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
+                        }
+                    }
                 }
             } else {
                 ui.centered_and_justified(|ui| {
@@ -348,6 +378,50 @@ impl eframe::App for CameraApp {
 
         ctx.request_repaint_after(Duration::from_millis(8));
     }
+}
+
+
+fn run_face_ai(src: &RgbImage) -> Option<(Vec<(f32, f32, f32, f32, f32)>, String)> {
+    let max_w = 640u32;
+    let small = if src.width() > max_w {
+        let h = ((src.height() as f32) * max_w as f32 / src.width() as f32) as u32;
+        image::imageops::resize(src, max_w, h.max(1), image::imageops::FilterType::Triangle)
+    } else { src.clone() };
+    let path: PathBuf = std::env::temp_dir().join("4k-rust-camera-ar.png");
+    if small.save(&path).is_err() { return Some((Vec::new(), "AR: could not prepare preview frame".to_owned())); }
+    let mut detector = match FaceDetector::builder(ModelSource::path(model_path()))
+        .min_detection_confidence(mediapipe::Confidence::new(0.5).ok()?)
+        .min_suppression_threshold(IouThreshold::new(0.3).ok()?)
+        .build() {
+        Ok(d) => d,
+        Err(e) => return Some((Vec::new(), format!("AR model unavailable: {e}"))),
+    };
+    let image = match MpImage::from_file(&path) {
+        Ok(image) => image,
+        Err(e) => return Some((Vec::new(), format!("AR image input failed: {e}"))),
+    };
+    let detections = match detector.detect(&image) {
+        Ok(v) => v,
+        Err(e) => return Some((Vec::new(), format!("AR inference failed: {e}"))),
+    };
+    let sx = src.width() as f32 / small.width().max(1) as f32;
+    let sy = src.height() as f32 / small.height().max(1) as f32;
+    let boxes = detections.into_iter().map(|face| {
+        let b = face.bounding_box;
+        let score = face.score().map(|v| v.get()).unwrap_or(0.0);
+        (b.left() as f32 * sx, b.top() as f32 * sy, b.width() as f32 * sx, b.height() as f32 * sy, score)
+    }).collect::<Vec<_>>();
+    let count = boxes.len();
+    let _ = std::fs::remove_file(&path);
+    Some((boxes, format!("AR active · {} face(s)", count)))
+}
+
+fn model_path() -> PathBuf {
+    let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+    p.pop();
+    p.push("models");
+    p.push("blaze_face_short_range.tflite");
+    p
 }
 
 fn auto_tune(src: &RgbImage) -> Tuning {
