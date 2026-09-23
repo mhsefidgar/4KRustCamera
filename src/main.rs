@@ -77,10 +77,15 @@ struct CameraApp {
     last_process_ms: f32,
     face_boxes: Vec<(f32, f32, f32, f32, f32)>,
     ar_status: String,
+    ar_tx: Sender<RgbImage>,
+    ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, String)>,
 }
 
 impl CameraApp {
     fn new(rx: Receiver<CameraEvent>, camera_tx: Sender<CameraCommand>) -> Self {
+        let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
+        let (worker_tx, ar_rx) = bounded::<(Vec<(f32, f32, f32, f32, f32)>, String)>(2);
+        thread::spawn(move || face_ai_worker(worker_rx, worker_tx));
         Self {
             rx,
             camera_tx,
@@ -103,6 +108,8 @@ impl CameraApp {
             last_process_ms: 0.0,
             face_boxes: Vec::new(),
             ar_status: "AR off".to_owned(),
+            ar_tx,
+            ar_rx,
         }
     }
 
@@ -153,15 +160,17 @@ impl CameraApp {
             }
         }
 
+        while let Ok((boxes, status)) = self.ar_rx.try_recv() {
+            self.face_boxes = boxes;
+            self.ar_status = status;
+        }
+
         if let Some((raw, capture_ms)) = latest {
             let start = Instant::now();
             let enhanced = enhance(&raw, &self.tuning);
             let process_ms = start.elapsed().as_secs_f32() * 1000.0;
             if self.ar_enabled {
-                if let Some((boxes, status)) = run_face_ai(&raw) {
-                    self.face_boxes = boxes;
-                    self.ar_status = status;
-                }
+                let _ = self.ar_tx.try_send(raw.clone());
             } else {
                 self.face_boxes.clear();
                 self.ar_status = "AR off".to_owned();
