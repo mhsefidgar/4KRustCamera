@@ -390,49 +390,66 @@ impl eframe::App for CameraApp {
 }
 
 
-fn run_face_ai(src: &RgbImage) -> Option<(Vec<(f32, f32, f32, f32, f32)>, String)> {
-    let max_w = 640u32;
-    let small = if src.width() > max_w {
-        let h = ((src.height() as f32) * max_w as f32 / src.width() as f32) as u32;
-        image::imageops::resize(src, max_w, h.max(1), image::imageops::FilterType::Triangle)
-    } else { src.clone() };
-    let path: PathBuf = std::env::temp_dir().join("4k-rust-camera-ar.png");
-    if small.save(&path).is_err() { return Some((Vec::new(), "AR: could not prepare preview frame".to_owned())); }
-    let mut detector = match FaceDetector::builder(ModelSource::path(model_path()))
-        .min_detection_confidence(mediapipe::Confidence::new(0.5).ok()?)
-        .min_suppression_threshold(IouThreshold::new(0.3).ok()?)
+fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<(f32, f32, f32, f32, f32)>, String)>) {
+    let model = model_path();
+    if !model.exists() {
+        let _ = tx.send((Vec::new(), "AR: downloading lightweight face model…".to_owned()));
+        if let Err(e) = download_face_model(&model) {
+            let _ = tx.send((Vec::new(), format!("AR unavailable: {e}")));
+            return;
+        }
+    }
+    let mut detector = match FaceDetector::builder(ModelSource::path(&model))
+        .min_detection_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
+        .min_suppression_threshold(IouThreshold::new(0.3).expect("valid IoU threshold"))
         .build() {
         Ok(d) => d,
-        Err(e) => return Some((Vec::new(), format!("AR model unavailable: {e}"))),
+        Err(e) => { let _ = tx.send((Vec::new(), format!("AR model load failed: {e}"))); return; }
     };
-    let image = match MpImage::from_file(&path) {
-        Ok(image) => image,
-        Err(e) => return Some((Vec::new(), format!("AR image input failed: {e}"))),
-    };
-    let detections = match detector.detect(&image) {
-        Ok(v) => v,
-        Err(e) => return Some((Vec::new(), format!("AR inference failed: {e}"))),
-    };
-    let sx = src.width() as f32 / small.width().max(1) as f32;
-    let sy = src.height() as f32 / small.height().max(1) as f32;
-    let boxes = detections.into_iter().map(|face| {
-        let b = face.bounding_box;
-        let score = face.score().map(|v| v.get()).unwrap_or(0.0);
-        (b.left() as f32 * sx, b.top() as f32 * sy, b.width() as f32 * sx, b.height() as f32 * sy, score)
-    }).collect::<Vec<_>>();
-    let count = boxes.len();
-    let _ = std::fs::remove_file(&path);
-    Some((boxes, format!("AR active · {} face(s)", count)))
+    let _ = tx.send((Vec::new(), "AR ready".to_owned()));
+    while let Ok(src) = rx.recv() {
+        let max_w = 640u32;
+        let small = if src.width() > max_w {
+            let h = ((src.height() as f32) * max_w as f32 / src.width() as f32) as u32;
+            image::imageops::resize(&src, max_w, h.max(1), image::imageops::FilterType::Triangle)
+        } else { src.clone() };
+        let temp = std::env::temp_dir().join("4k-rust-camera-ar.png");
+        if let Err(e) = small.save(&temp) { let _ = tx.try_send((Vec::new(), format!("AR frame preparation failed: {e}"))); continue; }
+        let result: Result<Vec<(f32, f32, f32, f32, f32)>> = (|| {
+            let image = MpImage::from_file(&temp)?;
+            let detections = detector.detect(&image)?;
+            let sx = src.width() as f32 / small.width().max(1) as f32;
+            let sy = src.height() as f32 / small.height().max(1) as f32;
+            Ok(detections.into_iter().map(|face| {
+                let bb = face.bounding_box;
+                let score = face.score().map(|v| v.get()).unwrap_or(0.0);
+                (bb.left() as f32 * sx, bb.top() as f32 * sy, bb.width() as f32 * sx, bb.height() as f32 * sy, score)
+            }).collect())
+        })();
+        let _ = std::fs::remove_file(&temp);
+        match result {
+            Ok(boxes) => { let count = boxes.len(); let _ = tx.try_send((boxes, format!("AR active · {} face(s)", count))); }
+            Err(e) => { let _ = tx.try_send((Vec::new(), format!("AR inference failed: {e}"))); }
+        }
+    }
+}
+
+fn download_face_model(path: &PathBuf) -> Result<()> {
+    const URL: &str = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    let mut response = ureq::get(URL).call().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
+    let bytes = response.body_mut().with_config().limit(2 * 1024 * 1024).read_to_vec().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
+    if bytes.len() < 100_000 { anyhow::bail!("downloaded model is unexpectedly small"); }
+    let temp = path.with_extension("part");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(temp, path)?;
+    Ok(())
 }
 
 fn model_path() -> PathBuf {
     let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    p.pop();
-    p.push("models");
-    p.push("blaze_face_short_range.tflite");
-    p
+    p.pop(); p.push("models"); p.push("blaze_face_short_range.tflite"); p
 }
-
 fn auto_tune(src: &RgbImage) -> Tuning {
     let mut sum = 0.0f64;
     let mut r_sum = 0.0f64;
