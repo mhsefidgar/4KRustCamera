@@ -263,18 +263,3 @@ extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Unregister4KRustCamer
     if (SUCCEEDED(hr)) hr = DllUnregisterServer();
     return hr;
 }
-
-extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllRegisterServer() {
-    wchar_t module[MAX_PATH]{}; if(!GetModuleFileNameW(g_module,module,MAX_PATH)) return HRESULT_FROM_WIN32(GetLastError());
-    wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
-    std::wstring key=L"Software\\Classes\\CLSID\\"+std::wstring(clsid)+L"\\InprocServer32"; HKEY h=nullptr;
-    LONG rc=RegCreateKeyExW(HKEY_CURRENT_USER,key.c_str(),0,nullptr,0,KEY_SET_VALUE,nullptr,&h,nullptr); if(rc!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(rc);
-    rc=RegSetValueExW(h,nullptr,0,REG_SZ,reinterpret_cast<const BYTE*>(module),(DWORD)((wcslen(module)+1)*sizeof(wchar_t)));
-    if(rc==ERROR_SUCCESS){const wchar_t* tm=L"Both";rc=RegSetValueExW(h,L"ThreadingModel",0,REG_SZ,reinterpret_cast<const BYTE*>(tm),(DWORD)((wcslen(tm)+1)*sizeof(wchar_t)));}
-    RegCloseKey(h); return HRESULT_FROM_WIN32(rc);
-}
-extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllUnregisterServer() {
-    wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
-    std::wstring key=L"Software\\Classes\\CLSID\\"+std::wstring(clsid); LONG rc=RegDeleteTreeW(HKEY_CURRENT_USER,key.c_str());
-    return rc==ERROR_FILE_NOT_FOUND?S_OK:HRESULT_FROM_WIN32(rc);
-}
