@@ -124,8 +124,8 @@ public:
     HRESULT Start(IMFPresentationDescriptor* pd,const GUID*,const PROPVARIANT*)override;
     HRESULT Stop()override;
     HRESULT Pause()override{return MF_E_INVALID_STATE_TRANSITION;}
-    HRESULT GetSourceAttributes(IMFAttributes** a) override { if(!a)return E_POINTER; *a=nullptr; return QueryInterface(IID_PPV_ARGS(a)); }
-    HRESULT GetStreamAttributes(DWORD id, IMFAttributes** a) override { if(!a)return E_POINTER; *a=nullptr; if(id!=0)return E_INVALIDARG; return stream_->QueryInterface(IID_PPV_ARGS(a)); }
+    HRESULT GetSourceAttributes(IMFAttributes** a) override { if(!a)return E_POINTER; *a=nullptr; return E_NOTIMPL; }
+    HRESULT GetStreamAttributes(DWORD id, IMFAttributes** a) override { if(!a)return E_POINTER; *a=nullptr; if(id!=0)return MF_E_INVALIDSTREAMNUMBER; return E_NOTIMPL; }
     HRESULT SetD3DManager(IUnknown*) override { return S_OK; }
     HRESULT GetService(REFGUID, REFIID, LPVOID*) override { return MF_E_UNSUPPORTED_SERVICE; }
     HRESULT Shutdown()override{if(stream_)stream_->Shutdown();started_=false;return S_OK;}
