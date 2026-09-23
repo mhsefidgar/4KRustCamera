@@ -329,7 +329,7 @@ fn camera_thread(tx: Sender<CameraEvent>) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() {
     let (tx, rx) = bounded::<CameraEvent>(2);
 
     thread::spawn(move || {
@@ -346,11 +346,11 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    if let Err(error) = eframe::run_native(
         "4K Rust Camera",
         options,
         Box::new(|_cc| Ok(Box::new(CameraApp::new(rx)))),
-    )?;
-
-    Ok(())
+    ) {
+        eprintln!("Application error: {error}");
+    }
 }
