@@ -439,7 +439,7 @@ impl eframe::App for CameraApp {
                             let r = egui::Rect::from_min_size(rect.min + egui::vec2(*x * sx, *y * sy), egui::vec2(*w * sx, *h * sy));
                             painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
                             painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE {:.0}%", score * 100.0), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
-                            draw_ar_object(&painter, r, self.ar_object, self.ar_scale);
+                            draw_ar_object(&painter, r, self.ar_layout, self.ar_object, self.ar_scale);
                         }
                     }
                 }
@@ -539,16 +539,22 @@ fn model_path() -> PathBuf {
     let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     p.pop(); p.push("models"); p.push("blaze_face_short_range.tflite"); p
 }
-fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: f32) {
-    if object == 0 { return; }
+fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, layout: usize, object: usize, scale: f32) {
+    if layout == 0 || object == 0 { return; }
+
+    // The detector currently supplies a face box, so these effects use a stable
+    // face-local coordinate system and a perspective projection rather than
+    // unrelated screen-space doodles.
     let cx = r.center().x;
-    let cy = r.top() + r.height() * 0.46;
-    let w = r.width() * scale;
-    let h = r.height() * scale;
+    let cy = r.top() + r.height() * 0.45;
+    let w = r.width() * scale.clamp(0.5, 1.8);
+    let h = r.height() * scale.clamp(0.5, 1.8);
+    let stroke = egui::Stroke::new((w * 0.012).clamp(1.5, 4.0), egui::Color32::WHITE);
+
     match object {
         1 => {
-            let lens_w = w * 0.28;
-            let lens_h = h * 0.14;
+            let lens_w = w * 0.27;
+            let lens_h = h * 0.13;
             let gap = w * 0.045;
             let left = egui::Rect::from_center_size(
                 egui::pos2(cx - lens_w - gap, cy),
@@ -558,44 +564,57 @@ fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: 
                 egui::pos2(cx + lens_w + gap, cy),
                 egui::vec2(lens_w, lens_h),
             );
-            painter.rect_stroke(left, 8.0, egui::Stroke::new(3.0_f32, egui::Color32::WHITE), egui::StrokeKind::Outside);
-            painter.rect_stroke(right, 8.0, egui::Stroke::new(3.0_f32, egui::Color32::WHITE), egui::StrokeKind::Outside);
-            painter.line_segment([egui::pos2(left.right(), cy), egui::pos2(right.left(), cy)], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
-            painter.line_segment([egui::pos2(left.left(), cy), egui::pos2(left.left() - w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
-            painter.line_segment([egui::pos2(right.right(), cy), egui::pos2(right.right() + w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
+            painter.rect_stroke(left, lens_h * 0.18, stroke, egui::StrokeKind::Outside);
+            painter.rect_stroke(right, lens_h * 0.18, stroke, egui::StrokeKind::Outside);
+            painter.line_segment(
+                [egui::pos2(left.right(), cy), egui::pos2(right.left(), cy)],
+                stroke,
+            );
+            painter.line_segment(
+                [left.left_top(), left.left_top() + egui::vec2(-w * 0.10, -h * 0.03)],
+                stroke,
+            );
+            painter.line_segment(
+                [right.right_top(), right.right_top() + egui::vec2(w * 0.10, -h * 0.03)],
+                stroke,
+            );
         }
         2 => {
-            let base_y = r.top() - h * 0.05;
-            let pts = [
-                egui::pos2(cx - w * 0.34, base_y),
-                egui::pos2(cx - w * 0.18, base_y - h * 0.22),
-                egui::pos2(cx - w * 0.03, base_y),
-                egui::pos2(cx + w * 0.08, base_y - h * 0.30),
-                egui::pos2(cx + w * 0.22, base_y),
-                egui::pos2(cx + w * 0.38, base_y - h * 0.16),
-                egui::pos2(cx + w * 0.42, base_y),
+            // Crown: a shallow 3D prism with front and offset back faces.
+            let base = cy - h * 0.38;
+            let depth = egui::vec2(w * 0.045, -h * 0.07);
+            let front = [
+                egui::pos2(cx - w * 0.40, base),
+                egui::pos2(cx - w * 0.25, base - h * 0.24),
+                egui::pos2(cx - w * 0.08, base),
+                egui::pos2(cx + w * 0.08, base - h * 0.31),
+                egui::pos2(cx + w * 0.25, base),
+                egui::pos2(cx + w * 0.40, base - h * 0.20),
+                egui::pos2(cx + w * 0.44, base),
             ];
-            for pair in pts.windows(2) {
-                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(4.0_f32, egui::Color32::WHITE));
-            }
-            painter.line_segment([pts[0], pts[6]], egui::Stroke::new(4.0_f32, egui::Color32::WHITE));
+            let back = front.map(|p| p + depth);
+            for pair in front.windows(2) { painter.line_segment([pair[0], pair[1]], stroke); }
+            for pair in back.windows(2) { painter.line_segment([pair[0], pair[1]], stroke); }
+            for i in [0usize, 2, 4, 6] { painter.line_segment([front[i], back[i]], stroke); }
+            painter.line_segment([front[0], front[6]], stroke);
+            painter.line_segment([back[0], back[6]], stroke);
         }
         3 => {
-            let depth = w * 0.10;
-            let top = egui::pos2(cx, cy - h * 0.20);
-            let left = egui::pos2(cx - w * 0.24, cy - h * 0.08);
-            let right = egui::pos2(cx + w * 0.24, cy - h * 0.08);
-            let bottom = egui::pos2(cx, cy + h * 0.22);
-            painter.line_segment([top, left], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
-            painter.line_segment([top, right], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
-            painter.line_segment([left, bottom], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
-            painter.line_segment([right, bottom], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
-            let o = egui::vec2(depth, -depth);
-            for (a, b) in [(top, left), (top, right), (left, bottom), (right, bottom)] {
-                painter.line_segment([a + o, b + o], egui::Stroke::new(2.0_f32, egui::Color32::WHITE));
-            }
-            for p in [top, left, right, bottom] {
-                painter.line_segment([p, p + o], egui::Stroke::new(2.0_f32, egui::Color32::WHITE));
+            // Cube: project a 3D cube with a consistent depth vector.
+            let half = w.min(h) * 0.18;
+            let depth = egui::vec2(half * 0.42, -half * 0.42);
+            let center = egui::pos2(cx, cy - h * 0.02);
+            let front = [
+                center + egui::vec2(-half, -half),
+                center + egui::vec2( half, -half),
+                center + egui::vec2( half,  half),
+                center + egui::vec2(-half,  half),
+            ];
+            let back = front.map(|p| p + depth);
+            for i in 0..4 {
+                painter.line_segment([front[i], front[(i + 1) % 4]], stroke);
+                painter.line_segment([back[i], back[(i + 1) % 4]], stroke);
+                painter.line_segment([front[i], back[i]], stroke);
             }
         }
         _ => {}
