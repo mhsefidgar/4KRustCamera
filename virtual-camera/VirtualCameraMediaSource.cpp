@@ -67,7 +67,7 @@ public:
             const uint64_t s2 = static_cast<uint64_t>(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(&ring_->header.sequence), 0, 0));
             if (s1 == s2 && !(s2 & 1)) return S_OK;
         }
-        return MF_E_AGAIN;
+        return MF_E_NOTACCEPTING;
     }
 };
 
