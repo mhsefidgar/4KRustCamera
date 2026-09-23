@@ -10,7 +10,7 @@ use nokhwa::{
 use rayon::prelude::*;
 use std::{path::PathBuf, thread, time::{Duration, Instant}};
 #[cfg(windows)] mod virtual_camera;
-use mediapipe::{FaceDetector, Image as MpImage, ModelSource, IouThreshold};
+use mediapipe::{FaceLandmarker, Image as MpImage, ModelSource, Timestamp};
 
 #[derive(Clone, Debug)]
 struct Tuning {
@@ -46,6 +46,13 @@ struct FramePair {
     process_ms: f32,
 }
 
+#[derive(Clone, Debug)]
+struct FaceTrack {
+    bbox: (f32, f32, f32, f32),
+    confidence: f32,
+    landmarks: Vec<(f32, f32, f32)>,
+}
+
 enum CameraEvent {
     Cameras(Vec<(CameraIndex, String)>),
     Frame(RgbImage, f32),
@@ -79,20 +86,20 @@ struct CameraApp {
     auto_tune_default_enabled: bool,
     auto_tune_interval_minutes: u32,
     last_auto_tune: Instant,
-    face_boxes: Vec<(f32, f32, f32, f32, f32)>,
+    face_tracks: Vec<FaceTrack>,
     ar_object: usize,
     ar_scale: f32,
     ar_status: String,
     #[cfg(windows)]
     virtual_camera_publisher: Option<virtual_camera::VirtualCameraPublisher>,
     ar_tx: Sender<RgbImage>,
-    ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, String)>,
+    ar_rx: Receiver<(Vec<FaceTrack>, String)>,
 }
 
 impl CameraApp {
     fn new(rx: Receiver<CameraEvent>, camera_tx: Sender<CameraCommand>) -> Self {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
-        let (worker_tx, ar_rx) = bounded::<(Vec<(f32, f32, f32, f32, f32)>, String)>(2);
+        let (worker_tx, ar_rx) = bounded::<(Vec<FaceTrack>, String)>(2);
         thread::spawn(move || face_ai_worker(worker_rx, worker_tx));
         Self {
             rx,
@@ -117,7 +124,7 @@ impl CameraApp {
             auto_tune_default_enabled: false,
             auto_tune_interval_minutes: 2,
             last_auto_tune: Instant::now(),
-            face_boxes: Vec::new(),
+            face_tracks: Vec::new(),
             ar_object: 1,
             ar_scale: 1.0,
             ar_status: "AR off".to_owned(),
@@ -175,8 +182,8 @@ impl CameraApp {
             }
         }
 
-        while let Ok((boxes, status)) = self.ar_rx.try_recv() {
-            self.face_boxes = boxes;
+        while let Ok((tracks, status)) = self.ar_rx.try_recv() {
+            self.face_tracks = tracks;
             self.ar_status = status;
         }
 
@@ -187,7 +194,7 @@ impl CameraApp {
             }
             let start = Instant::now();
             let mut enhanced = enhance(&raw, &self.tuning);
-            if self.ar_enabled && self.ar_object != 0 { for (x,y,w,h,_score) in &self.face_boxes { draw_ar_object_image(&mut enhanced, *x,*y,*w,*h,self.ar_object,self.ar_scale); } }
+            if self.ar_enabled && self.ar_object != 0 { for track in &self.face_tracks { draw_ar_object_image(&mut enhanced, track, self.ar_object, self.ar_scale); } }
             #[cfg(windows)]
             if self.virtual_webcam {
                 if let Some(publisher) = &mut self.virtual_camera_publisher {
@@ -198,7 +205,7 @@ impl CameraApp {
             if self.ar_enabled {
                 let _ = self.ar_tx.try_send(raw.clone());
             } else {
-                self.face_boxes.clear();
+                self.face_tracks.clear();
                 self.ar_status = "AR off".to_owned();
             }
 
@@ -239,7 +246,7 @@ impl eframe::App for CameraApp {
                 ui.separator();
                 ui.label(format!("{:.1} FPS", self.fps));
                 ui.separator();
-                ui.label(format!("{} face{}", self.face_boxes.len(), if self.face_boxes.len() == 1 { "" } else { "s" }));
+                ui.label(format!("{} face{}", self.face_tracks.len(), if self.face_tracks.len() == 1 { "" } else { "s" }));
                 ui.separator();
                 ui.label(if self.ar_enabled { "AR ON" } else { "AR OFF" });
                 #[cfg(windows)]
@@ -353,7 +360,7 @@ impl eframe::App for CameraApp {
                 ui.separator();
                 ui.collapsing("Face AR", |ui| {
                 if ui.checkbox(&mut self.ar_enabled, "Enable face AR").changed() {
-                    if self.ar_enabled { self.ar_status = "Starting MediaPipe face detector…".to_owned(); }
+                    if self.ar_enabled { self.ar_status = "Starting MediaPipe Face Landmarker…".to_owned(); }
                     else { self.face_boxes.clear(); self.ar_status = "AR off".to_owned(); }
                 }
                 ui.label(format!("Status: {}", self.ar_status));
@@ -373,7 +380,7 @@ impl eframe::App for CameraApp {
                         ui.add(egui::Slider::new(&mut self.ar_scale, 0.5..=1.8).text("3D effect scale"));
                     }
                 }
-                ui.small("MediaPipe BlazeFace runs on a reduced preview frame; the 4K enhancement path is not replaced.");
+                ui.small("MediaPipe Face Landmarker runs on a reduced preview frame and supplies dense landmarks; the 4K enhancement path remains separate.");
                 #[cfg(windows)] {
                     ui.checkbox(&mut self.virtual_webcam, "Publish enhanced frames to virtual camera");
                     ui.horizontal_wrapped(|ui| {
@@ -466,15 +473,19 @@ impl eframe::App for CameraApp {
                     let ratio = enhanced.size_vec2().y / enhanced.size_vec2().x;
                     let size = egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.92));
                     let response = ui.image((enhanced.id(), size));
-                    if self.ar_enabled && !self.face_boxes.is_empty() {
+                    if self.ar_enabled && !self.face_tracks.is_empty() {
                         let rect = response.rect;
                         let sx = rect.width() / enhanced.size_vec2().x.max(1.0);
                         let sy = rect.height() / enhanced.size_vec2().y.max(1.0);
                         let painter = ui.painter_at(rect);
-                        for (x, y, w, h, score) in &self.face_boxes {
-                            let r = egui::Rect::from_min_size(rect.min + egui::vec2(*x * sx, *y * sy), egui::vec2(*w * sx, *h * sy));
-                            painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
-                            painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE {:.0}%", score * 100.0), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
+                        for track in &self.face_tracks {
+                            let (x, y, w, h) = track.bbox;
+                            let r = egui::Rect::from_min_size(rect.min + egui::vec2(x * sx, y * sy), egui::vec2(w * sx, h * sy));
+                            painter.rect_stroke(r, 8.0, egui::Stroke::new(1.5_f32, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
+                            painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE · {} landmarks", track.landmarks.len()), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
+                            for &(lx, ly, _lz) in &track.landmarks {
+                                painter.circle_filled(rect.min + egui::vec2(lx * enhanced.size_vec2().x * sx, ly * enhanced.size_vec2().y * sy), 1.5, egui::Color32::LIGHT_GREEN);
+                            }
                             draw_ar_object(&painter, r, self.ar_object, self.ar_scale);
                         }
                     }
@@ -495,80 +506,87 @@ impl eframe::App for CameraApp {
 }
 
 
-fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<(f32, f32, f32, f32, f32)>, String)>) {
-    let model = model_path();
+fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<FaceTrack>, String)>) {
+    let model = face_landmarker_model_path();
     if !model.exists() {
-        let _ = tx.send((Vec::new(), "AR: downloading lightweight face model…".to_owned()));
-        if let Err(e) = download_face_model(&model) {
+        let _ = tx.send((Vec::new(), "AR: downloading Face Landmarker model…".to_owned()));
+        if let Err(e) = download_face_landmarker_model(&model) {
             let _ = tx.send((Vec::new(), format!("AR unavailable: {e}")));
             return;
         }
     }
-    let mut detector = match FaceDetector::builder(ModelSource::path(&model))
-        .min_detection_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
-        .min_suppression_threshold(IouThreshold::new(0.3).expect("valid IoU threshold"))
-        .build()
+    let mut landmarker = match FaceLandmarker::builder(ModelSource::path(&model))
+        .num_faces(std::num::NonZeroU32::new(4).expect("non-zero"))
+        .min_face_detection_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
+        .min_face_presence_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
+        .min_tracking_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
+        .output_blendshapes(true)
+        .output_transformation_matrixes(true)
+        .build_for_video()
     {
-        Ok(d) => d,
+        Ok(v) => v,
         Err(e) => {
-            let _ = tx.send((Vec::new(), format!("AR model load failed: {e}")));
+            let _ = tx.send((Vec::new(), format!("AR Face Landmarker load failed: {e}")));
             return;
         }
     };
-    let _ = tx.send((Vec::new(), "AR ready".to_owned()));
+    let _ = tx.send((Vec::new(), "AR ready · dense face tracking".to_owned()));
+    let mut timestamp_ms = 0i64;
     while let Ok(src) = rx.recv() {
         let max_w = 640u32;
         let small = if src.width() > max_w {
             let h = ((src.height() as f32) * max_w as f32 / src.width() as f32) as u32;
             image::imageops::resize(&src, max_w, h.max(1), image::imageops::FilterType::Triangle)
-        } else {
-            src.clone()
-        };
+        } else { src.clone() };
         let temp = std::env::temp_dir().join("4k-rust-camera-ar.png");
         if let Err(e) = small.save(&temp) {
             let _ = tx.try_send((Vec::new(), format!("AR frame preparation failed: {e}")));
             continue;
         }
-        let result: Result<Vec<(f32, f32, f32, f32, f32)>> = (|| {
+        timestamp_ms += 33;
+        let result: Result<Vec<FaceTrack>> = (|| {
             let image = MpImage::from_file(&temp)?;
-            let detections = detector.detect(&image)?;
+            let result = landmarker.detect_for_video(&image, Timestamp::from_millis(timestamp_ms))?;
             let sx = src.width() as f32 / small.width().max(1) as f32;
             let sy = src.height() as f32 / small.height().max(1) as f32;
-            Ok(detections.into_iter().map(|face| {
-                let bb = face.bounding_box;
-                let score = face.score().map(|v| v.get()).unwrap_or(0.0);
-                (
-                    bb.left() as f32 * sx,
-                    bb.top() as f32 * sy,
-                    bb.width() as f32 * sx,
-                    bb.height() as f32 * sy,
-                    score,
-                )
+            Ok(result.landmarks.into_iter().map(|face| {
+                let points: Vec<(f32, f32, f32)> = face.iter().map(|p| (p.x(), p.y(), p.z())).collect();
+                let (mut min_x, mut min_y, mut max_x, mut max_y) = (1.0, 1.0, 0.0, 0.0);
+                for &(x,y,_) in &points { min_x=min_x.min(x); min_y=min_y.min(y); max_x=max_x.max(x); max_y=max_y.max(y); }
+                FaceTrack {
+                    bbox: (min_x * small.width() as f32 * sx, min_y * small.height() as f32 * sy,
+                           (max_x-min_x) * small.width() as f32 * sx, (max_y-min_y) * small.height() as f32 * sy),
+                    confidence: 1.0,
+                    landmarks: points,
+                }
             }).collect())
         })();
         let _ = std::fs::remove_file(&temp);
         match result {
-            Ok(boxes) => {
-                let count = boxes.len();
-                let _ = tx.try_send((boxes, format!("AR active · {} face(s)", count)));
+            Ok(tracks) => {
+                let count = tracks.len();
+                let _ = tx.try_send((tracks, format!("AR active · {} face(s) · dense landmarks", count)));
             }
-            Err(e) => {
-                let _ = tx.try_send((Vec::new(), format!("AR inference failed: {e}")));
-            }
+            Err(e) => { let _ = tx.try_send((Vec::new(), format!("AR inference failed: {e}"))); }
         }
     }
 }
 
-fn download_face_model(path: &PathBuf) -> Result<()> {
-    const URL: &str = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+fn download_face_landmarker_model(path: &PathBuf) -> Result<()> {
+    const URL: &str = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let mut response = ureq::get(URL).call().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
-    let bytes = response.body_mut().with_config().limit(2 * 1024 * 1024).read_to_vec().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
-    if bytes.len() < 100_000 { anyhow::bail!("downloaded model is unexpectedly small"); }
+    let bytes = response.body_mut().with_config().limit(30 * 1024 * 1024).read_to_vec().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
+    if bytes.len() < 1_000_000 { anyhow::bail!("downloaded Face Landmarker model is unexpectedly small"); }
     let temp = path.with_extension("part");
     std::fs::write(&temp, bytes)?;
     std::fs::rename(temp, path)?;
     Ok(())
+}
+
+fn face_landmarker_model_path() -> PathBuf {
+    let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+    p.pop(); p.push("models"); p.push("face_landmarker.task"); p
 }
 
 fn model_path() -> PathBuf {
