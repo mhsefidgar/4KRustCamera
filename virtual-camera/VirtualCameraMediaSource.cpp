@@ -213,6 +213,9 @@ extern "C" HRESULT STDAPICALLTYPE DllGetClassObject(REFCLSID clsid,REFIID riid,v
 extern "C" HRESULT STDAPICALLTYPE DllCanUnloadNow(){return S_FALSE;}
 BOOL APIENTRY DllMain(HMODULE hModule,DWORD reason,LPVOID){ if(reason==DLL_PROCESS_ATTACH){g_module=hModule; DisableThreadLibraryCalls(hModule);} return TRUE; }
 
+extern "C" HRESULT STDMETHODCALLTYPE DllRegisterServer();
+extern "C" HRESULT STDMETHODCALLTYPE DllUnregisterServer();
+
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera() {
     wchar_t sourceId[64]{};
     StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
@@ -229,17 +232,20 @@ extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera(
 }
 
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Unregister4KRustCamera() {
+    HRESULT hr = MFStartup(MF_VERSION);
+    if (FAILED(hr)) return hr;
     wchar_t sourceId[64]{};
     StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
     IMFVirtualCamera* camera = nullptr;
-    HRESULT hr = MFCreateVirtualCamera(
+    hr = MFCreateVirtualCamera(
         MFVirtualCameraType_SoftwareCameraSource,
         MFVirtualCameraLifetime_System,
         MFVirtualCameraAccess_CurrentUser,
         L"4K Rust Camera", sourceId, nullptr, 0, &camera);
-    if (FAILED(hr)) return hr;
-    hr = camera->Remove();
-    camera->Release();
+    if (SUCCEEDED(hr)) hr = camera->Remove();
+    if (camera) camera->Release();
+    MFShutdown();
+    if (SUCCEEDED(hr)) hr = DllUnregisterServer();
     return hr;
 }
 
