@@ -11,6 +11,7 @@ crossbeam-channel = "0.5"
 eframe = "0.33"
 egui = "0.33"
 image = "0.25"
+mediapipe = "0.1.0"
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 rayon = "1.11"
 
