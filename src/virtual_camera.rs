@@ -5,7 +5,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::{
     Foundation::{CloseHandle, FreeLibrary, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
     System::{
-        LibraryLoader::{GetProcAddress, LoadLibraryW},
+        LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH},
         Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
         Performance::QueryPerformanceCounter,
         Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
@@ -116,8 +116,11 @@ pub fn call_registration(register: bool) -> Result<()> {
     path.set_file_name("4KRustCameraVirtualCamera.dll");
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     unsafe {
-        let module = LoadLibraryW(wide.as_ptr());
-        if module.is_null() { anyhow::bail!("LoadLibraryW failed: {}", GetLastError()); }
+        let module = LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH);
+        if module.is_null() {
+            let code = GetLastError();
+            anyhow::bail!("LoadLibraryExW failed: {} (DLL path: {})", code, path.display());
+        }
         let name: &[u8] = if register { b"Register4KRustCamera\0" } else { b"Unregister4KRustCamera\0" };
         let proc = GetProcAddress(module, name.as_ptr());
         if proc.is_none() { FreeLibrary(module); anyhow::bail!("virtual-camera registration export is missing"); }
