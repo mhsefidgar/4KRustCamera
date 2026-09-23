@@ -1,0 +1,22 @@
+[package]
+name = "4k-rust-camera"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time Windows camera enhancement with a raw-vs-enhanced comparison view."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+crossbeam-channel = "0.5"
+eframe = "0.33"
+egui = "0.33"
+image = "0.25"
+nokhwa = { version = "0.10.11", features = ["input-native"] }
+rayon = "1.11"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
