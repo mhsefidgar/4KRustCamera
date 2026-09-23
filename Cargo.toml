@@ -1,5 +1,5 @@
 [package]
-name = "4k-rust-camera"
+name = "k4-rust-camera"
 version = "0.1.0"
 edition = "2021"
 description = "Real-time Windows camera enhancement with a raw-vs-enhanced comparison view."
