@@ -26,6 +26,7 @@ static const CLSID CLSID_4KRustCameraVirtualSource =
 
 static const UINT32 VC_FPS_NUM = 30;
 static const UINT32 VC_FPS_DEN = 1;
+static HMODULE g_module = nullptr;
 
 template<class T> static void SafeRelease(T** p) { if (p && *p) { (*p)->Release(); *p=nullptr; } }
 
@@ -211,9 +212,10 @@ extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllGetClassObject(REF
     Factory*f=new(std::nothrow)Factory();if(!f)return E_OUTOFMEMORY;HRESULT hr=f->QueryInterface(riid,ppv);f->Release();return hr;
 }
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllCanUnloadNow(){return S_FALSE;}
+BOOL APIENTRY DllMain(HMODULE hModule,DWORD reason,LPVOID){ if(reason==DLL_PROCESS_ATTACH){g_module=hModule; DisableThreadLibraryCalls(hModule);} return TRUE; }
 
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllRegisterServer() {
-    wchar_t module[MAX_PATH]{}; if(!GetModuleFileNameW(nullptr,module,MAX_PATH)) return HRESULT_FROM_WIN32(GetLastError());
+    wchar_t module[MAX_PATH]{}; if(!GetModuleFileNameW(g_module,module,MAX_PATH)) return HRESULT_FROM_WIN32(GetLastError());
     wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
     std::wstring key=L"Software\\Classes\\CLSID\\"+std::wstring(clsid)+L"\\InprocServer32"; HKEY h=nullptr;
     LONG rc=RegCreateKeyExW(HKEY_CURRENT_USER,key.c_str(),0,nullptr,0,KEY_SET_VALUE,nullptr,&h,nullptr); if(rc!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(rc);
