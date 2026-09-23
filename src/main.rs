@@ -60,6 +60,11 @@ struct CameraApp {
     last_frame: Instant,
     fps: f32,
     error: Option<String>,
+    frames: u64,
+    dropped_estimate: u64,
+    show_stats: bool,
+    active_section: u8,
+    last_process_ms: f32,
 }
 
 impl CameraApp {
@@ -75,6 +80,11 @@ impl CameraApp {
             last_frame: Instant::now(),
             fps: 0.0,
             error: None,
+            frames: 0,
+            dropped_estimate: 0,
+            show_stats: true,
+            active_section: 0,
+            last_process_ms: 0.0,
         }
     }
 
@@ -133,6 +143,8 @@ impl CameraApp {
             };
             self.last_frame = Instant::now();
 
+            self.frames += 1;
+            self.last_process_ms = process_ms;
             self.pair = Some(FramePair {
                 raw,
                 enhanced,
@@ -149,10 +161,13 @@ impl eframe::App for CameraApp {
         self.update_frame(ctx);
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("4K Rust Camera");
                 ui.separator();
-                ui.label(format!("Realtime {:.1} FPS", self.fps));
+                ui.label(egui::RichText::new("LIVE").strong().color(egui::Color32::LIGHT_GREEN));
+                ui.separator();
+                ui.label(format!("{:.1} FPS", self.fps));
 
                 if let Some(p) = &self.pair {
                     ui.label(format!(
@@ -161,15 +176,31 @@ impl eframe::App for CameraApp {
                     ));
                 }
 
-                ui.checkbox(&mut self.compare, "Compare baseline");
+                ui.separator();
+                ui.checkbox(&mut self.compare, "A/B compare");
                 ui.checkbox(&mut self.frozen, "Freeze");
+                ui.checkbox(&mut self.show_stats, "Stats");
             });
         });
 
         egui::SidePanel::left("controls")
-            .min_width(245.0)
+            .resizable(true)
+            .default_width(285.0)
+            .min_width(250.0)
             .show(ctx, |ui| {
-                ui.heading("Enhancement tuning");
+                ui.heading("Camera controls");
+                ui.small("Live enhancement pipeline");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Source");
+                    ui.monospace("Windows Camera #0");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Mode");
+                    ui.monospace("Highest FPS");
+                });
+                ui.separator();
+                ui.heading("Image tuning");
                 ui.add(egui::Slider::new(&mut self.tuning.exposure, -1.0..=1.0).text("Exposure"));
                 ui.add(egui::Slider::new(&mut self.tuning.contrast, 0.7..=1.5).text("Contrast"));
                 ui.add(
@@ -186,19 +217,39 @@ impl eframe::App for CameraApp {
                     egui::Slider::new(&mut self.tuning.shadow_lift, 0.0..=0.5).text("Shadows"),
                 );
 
-                if ui.button("Reset tuning").clicked() {
+                ui.horizontal(|ui| {
+                    if ui.button("Reset").clicked() {
+                        self.tuning = Tuning::default();
+                    }
+                    if ui.button("Neutral").clicked() {
+                        self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() };
+                    }
+                });
+
+                if false {
                     self.tuning = Tuning::default();
                 }
 
                 ui.separator();
-                ui.heading("Pipeline");
+                ui.collapsing("Performance", |ui| {
+                    ui.label(format!("Frames processed: {}", self.frames));
+                    ui.label(format!("Last enhancement: {:.1} ms", self.last_process_ms));
+                    if let Some(p) = &self.pair {
+                        ui.label(format!("Capture/decode: {:.1} ms", p.capture_ms));
+                    }
+                    ui.small("The newest frame is preferred so processing cannot build an unbounded queue.");
+                });
+
+                ui.collapsing("Pipeline", |ui| {
                 ui.label("Low-latency CPU enhancement is applied to every frame.");
                 ui.small("Frames are dropped intentionally when processing falls behind, keeping latency bounded.");
 
-                ui.separator();
-                ui.heading("AI detail");
-                ui.label("Optional lightweight SwinIR/Swin2SR x2 model support is packaged separately. It is not forced into the realtime 4K path.");
-                ui.small("This build does not claim AI inference until an ONNX runtime backend is enabled.");
+                });
+
+                ui.collapsing("AI detail", |ui| {
+                    ui.label("AI enhancement is intentionally disabled in the live 4K path until an ONNX/DirectML backend is benchmarked.");
+                    ui.small("Planned: lightweight tiled inference with a latency guard, rather than forcing a heavy model over every 4K frame.");
+                });
 
                 if let Some(err) = &self.error {
                     ui.separator();
@@ -207,20 +258,33 @@ impl eframe::App for CameraApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
             if let (Some(raw), Some(enhanced)) = (&self.raw_texture, &self.enhanced_texture) {
                 if self.compare {
                     ui.columns(2, |cols| {
-                        cols[0].label("Decoded camera baseline");
-                        cols[0].image(raw);
-                        cols[1].label("Enhanced realtime feed");
-                        cols[1].image(enhanced);
+                        cols[0].label(egui::RichText::new("BASELINE").strong());
+                        let avail = cols[0].available_size();
+                        let ratio = raw.size_vec2().y / raw.size_vec2().x;
+                        cols[0].image((raw.id(), egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.88))));
+                        cols[1].label(egui::RichText::new("ENHANCED").strong());
+                        let avail = cols[1].available_size();
+                        let ratio = enhanced.size_vec2().y / enhanced.size_vec2().x;
+                        cols[1].image((enhanced.id(), egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.88))));
                     });
                 } else {
-                    ui.label("Enhanced realtime feed");
-                    ui.image(enhanced);
+                    ui.label(egui::RichText::new("ENHANCED REALTIME FEED").strong());
+                    let avail = ui.available_size();
+                    let ratio = enhanced.size_vec2().y / enhanced.size_vec2().x;
+                    ui.image((enhanced.id(), egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.92))));
                 }
             } else {
-                ui.centered_and_justified(|ui| ui.label("Opening the first Windows camera…"));
+                ui.centered_and_justified(|ui| {
+                    ui.heading("Waiting for camera");
+                    ui.label("Opening Windows camera #0 and negotiating the highest available frame rate…");
+                    if let Some(err) = &self.error {
+                        ui.colored_label(egui::Color32::RED, err);
+                    }
+                });
             }
         });
 
@@ -346,11 +410,9 @@ fn main() {
         ..Default::default()
     };
 
-    if let Err(error) = eframe::run_native(
+    let _ = eframe::run_native(
         "4K Rust Camera",
         options,
         Box::new(|_cc| Ok(Box::new(CameraApp::new(rx)))),
-    ) {
-        eprintln!("Application error: {error}");
-    }
+    );
 }
