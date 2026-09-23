@@ -234,6 +234,13 @@ extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera(
     wchar_t sourceId[64]{};
     StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
     IMFVirtualCamera* camera = nullptr;
+    // Register the COM class before creating the virtual camera. MF uses
+    // sourceId to activate this exact IMFMediaSource implementation.
+    hr = DllRegisterServer();
+    if (FAILED(hr)) {
+        MFShutdown();
+        return hr;
+    }
     hr = MFCreateVirtualCamera(
         MFVirtualCameraType_SoftwareCameraSource,
         MFVirtualCameraLifetime_System,
