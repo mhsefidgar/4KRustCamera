@@ -118,7 +118,7 @@ impl CameraApp {
             auto_tune_interval_minutes: 2,
             last_auto_tune: Instant::now(),
             face_boxes: Vec::new(),
-            ar_object: 0,
+            ar_object: 1,
             ar_scale: 1.0,
             ar_status: "AR off".to_owned(),
             #[cfg(windows)]
@@ -233,32 +233,54 @@ impl eframe::App for CameraApp {
             ui.horizontal(|ui| {
                 ui.heading("4K Rust Camera");
                 ui.separator();
-                ui.label(egui::RichText::new("LIVE").strong().color(egui::Color32::LIGHT_GREEN));
+                let live_text = if self.frozen { "PAUSED" } else { "LIVE" };
+                let live_color = if self.frozen { egui::Color32::YELLOW } else { egui::Color32::LIGHT_GREEN };
+                ui.label(egui::RichText::new(live_text).strong().color(live_color));
                 ui.separator();
                 ui.label(format!("{:.1} FPS", self.fps));
-
-                if let Some(p) = &self.pair {
-                    ui.label(format!(
-                        "capture {:.1} ms · enhance {:.1} ms",
-                        p.capture_ms, p.process_ms
-                    ));
-                }
-
                 ui.separator();
-                ui.checkbox(&mut self.compare, "A/B compare");
-                ui.checkbox(&mut self.frozen, "Freeze");
+                ui.label(format!("{} face{}", self.face_boxes.len(), if self.face_boxes.len() == 1 { "" } else { "s" }));
+                ui.separator();
+                ui.label(if self.ar_enabled { "AR ON" } else { "AR OFF" });
+                #[cfg(windows)]
+                {
+                    ui.separator();
+                    ui.label(if self.virtual_webcam { "VIRTUAL CAMERA ON" } else { "VIRTUAL CAMERA OFF" });
+                }
+                if let Some(p) = &self.pair {
+                    ui.separator();
+                    ui.small(format!("capture {:.1} ms · enhance {:.1} ms", p.capture_ms, p.process_ms));
+                }
+                ui.separator();
+                if ui.button(if self.compare { "Enhanced view" } else { "A/B compare" }).clicked() {
+                    self.compare = !self.compare;
+                }
+                if ui.button(if self.frozen { "Resume" } else { "Freeze" }).clicked() {
+                    self.frozen = !self.frozen;
+                }
                 ui.checkbox(&mut self.show_stats, "Stats");
             });
         });
 
         egui::SidePanel::left("controls")
             .resizable(true)
-            .default_width(285.0)
+            .default_width(315.0)
             .min_width(250.0)
             .show(ctx, |ui| {
                 ui.heading("Camera");
-                ui.small("Live enhancement pipeline");
+                ui.small("Capture → enhance → AR → virtual camera");
                 ui.separator();
+                ui.group(|ui| {
+                    ui.strong("Quick controls");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Auto Enhance").clicked() {
+                            if let Some(pair) = &self.pair { self.tuning = auto_tune(&pair.raw); }
+                        }
+                        if ui.button("Reset").clicked() { self.tuning = Tuning::default(); }
+                        if ui.button(if self.compare { "Enhanced" } else { "Compare" }).clicked() { self.compare = !self.compare; }
+                    });
+                });
+                ui.add_space(4.0);
                 ui.label("Camera");
                 if self.cameras.is_empty() {
                     ui.label("Detecting cameras…");
@@ -300,23 +322,15 @@ impl eframe::App for CameraApp {
                     ui.small(if self.compare { "A/B comparison" } else { "Enhanced only" });
                 });
                 ui.separator();
-                ui.heading("Image tuning");
+                ui.collapsing("Image tuning", |ui| {
                 ui.add(egui::Slider::new(&mut self.tuning.exposure, -1.0..=1.0).text("Exposure"));
                 ui.add(egui::Slider::new(&mut self.tuning.contrast, 0.7..=1.5).text("Contrast"));
-                ui.add(
-                    egui::Slider::new(&mut self.tuning.saturation, 0.5..=1.6).text("Saturation"),
-                );
+                ui.add(egui::Slider::new(&mut self.tuning.saturation, 0.5..=1.6).text("Saturation"));
                 ui.add(egui::Slider::new(&mut self.tuning.sharpness, 0.0..=1.0).text("Detail"));
                 ui.add(egui::Slider::new(&mut self.tuning.denoise, 0.0..=0.6).text("Denoise"));
                 ui.add(egui::Slider::new(&mut self.tuning.warmth, -0.5..=0.5).text("Warmth"));
-                ui.add(
-                    egui::Slider::new(&mut self.tuning.highlight_recovery, 0.0..=0.7)
-                        .text("Highlights"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.tuning.shadow_lift, 0.0..=0.5).text("Shadows"),
-                );
-
+                ui.add(egui::Slider::new(&mut self.tuning.highlight_recovery, 0.0..=0.7).text("Highlights"));
+                ui.add(egui::Slider::new(&mut self.tuning.shadow_lift, 0.0..=0.5).text("Shadows"));
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Auto Tune").clicked() {
                         if let Some(pair) = &self.pair { self.tuning = auto_tune(&pair.raw); }
@@ -336,8 +350,9 @@ impl eframe::App for CameraApp {
                 }
                 ui.small("Automatic tuning updates the image parameters from the newest frame at the selected interval. Default interval: 2 minutes.");
                 ui.separator();
-                ui.heading("AR & virtual camera");
-                if ui.checkbox(&mut self.ar_enabled, "Face AR overlay").changed() {
+                ui.separator();
+                ui.collapsing("Face AR", |ui| {
+                if ui.checkbox(&mut self.ar_enabled, "Enable face AR").changed() {
                     if self.ar_enabled { self.ar_status = "Starting MediaPipe face detector…".to_owned(); }
                     else { self.face_boxes.clear(); self.ar_status = "AR off".to_owned(); }
                 }
@@ -370,7 +385,28 @@ impl eframe::App for CameraApp {
                         }
                     });
                 }
-                ui.small("The virtual camera uses a Windows Media Foundation custom source backed by a shared-memory frame ring.");
+                ui.small("Tracking is currently detector-based; the next AR engine will use landmarks, head pose and real 3D assets.");
+                });
+                ui.separator();
+                #[cfg(windows)]
+                ui.collapsing("Virtual camera", |ui| {
+                    ui.checkbox(&mut self.virtual_webcam, "Publish enhanced frames");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Register").clicked() {
+                            match virtual_camera::call_registration(true) {
+                                Ok(()) => self.error = None,
+                                Err(e) => self.error = Some(format!("{e:#}")),
+                            }
+                        }
+                        if ui.button("Unregister").clicked() {
+                            match virtual_camera::call_registration(false) {
+                                Ok(()) => self.virtual_webcam = false,
+                                Err(e) => self.error = Some(format!("{e:#}")),
+                            }
+                        }
+                    });
+                    ui.small("Frames published here are the same enhanced/AR-composited frames shown in the preview.");
+                });
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
@@ -401,6 +437,16 @@ impl eframe::App for CameraApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.strong(if self.compare { "Before / After" } else { "Live enhanced preview" });
+                ui.add_space(8.0);
+                ui.small(format!("{} × {}", self.pair.as_ref().map(|p| p.enhanced.width()).unwrap_or(0), self.pair.as_ref().map(|p| p.enhanced.height()).unwrap_or(0)));
+                if self.ar_enabled {
+                    ui.separator();
+                    ui.small(&self.ar_status);
+                }
+            });
             ui.add_space(4.0);
             if let (Some(raw), Some(enhanced)) = (&self.raw_texture, &self.enhanced_texture) {
                 if self.compare {
