@@ -361,7 +361,7 @@ impl eframe::App for CameraApp {
                 ui.collapsing("Face AR", |ui| {
                 if ui.checkbox(&mut self.ar_enabled, "Enable face AR").changed() {
                     if self.ar_enabled { self.ar_status = "Starting MediaPipe Face Landmarker…".to_owned(); }
-                    else { self.face_boxes.clear(); self.ar_status = "AR off".to_owned(); }
+                    else { self.face_tracks.clear(); self.ar_status = "AR off".to_owned(); }
                 }
                 ui.label(format!("Status: {}", self.ar_status));
                 if self.ar_enabled {
