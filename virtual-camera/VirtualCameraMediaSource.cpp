@@ -103,7 +103,7 @@ public:
     HRESULT GetStreamDescriptor(IMFStreamDescriptor** d) override { if(!d)return E_POINTER; *d=descriptor_; return descriptor_?descriptor_->AddRef(),S_OK:E_UNEXPECTED; }
 };
 
-class MediaSource final : public IMFMediaSource, public IMFMediaSourceEx, public IMFGetService {
+class MediaSource final : public IMFMediaSourceEx, public IMFGetService {
     std::atomic<ULONG> refs_{1};
     IMFMediaEventQueue* events_=nullptr;
     IMFPresentationDescriptor* presentation_=nullptr;
@@ -166,7 +166,7 @@ HRESULT MediaStream::RequestSample(IUnknown* token){
     SafeRelease(&sample);SafeRelease(&b);return hr;
 }
 
-HRESULT MediaSource::QueryInterface(REFIID riid,void** ppv){if(!ppv)return E_POINTER;*ppv=nullptr;if(riid==IID_IUnknown||riid==IID_IMFMediaSource){*ppv=static_cast<IMFMediaSource*>(this);AddRef();return S_OK;} if(riid==__uuidof(IMFMediaSourceEx)){*ppv=static_cast<IMFMediaSourceEx*>(this);AddRef();return S_OK;} if(riid==__uuidof(IMFGetService)){*ppv=static_cast<IMFGetService*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
+HRESULT MediaSource::QueryInterface(REFIID riid,void** ppv){if(!ppv)return E_POINTER;*ppv=nullptr;if(riid==IID_IUnknown||riid==IID_IMFMediaSource){*ppv=static_cast<IMFMediaSourceEx*>(this);AddRef();return S_OK;} if(riid==__uuidof(IMFMediaSourceEx)){*ppv=static_cast<IMFMediaSourceEx*>(this);AddRef();return S_OK;} if(riid==__uuidof(IMFGetService)){*ppv=static_cast<IMFGetService*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
 HRESULT MediaSource::Initialize(){HRESULT hr=MFCreateEventQueue(&events_);if(FAILED(hr))return hr;stream_=new(std::nothrow) MediaStream(this);if(!stream_)return E_OUTOFMEMORY;hr=stream_->Initialize();if(FAILED(hr))return hr;IMFStreamDescriptor* sd=nullptr;hr=stream_->GetStreamDescriptor(&sd);if(FAILED(hr))return hr;hr=MFCreatePresentationDescriptor(1,&sd,&presentation_);sd->Release();return hr;}
 HRESULT MediaSource::Start(IMFPresentationDescriptor* pd,const GUID*,const PROPVARIANT*){if(!pd)return E_POINTER;BOOL selected=FALSE;IMFStreamDescriptor* sd=nullptr;HRESULT hr=pd->GetStreamDescriptorByIndex(0,&selected,&sd);SafeRelease(&sd);if(FAILED(hr)||!selected)return MF_E_INVALIDREQUEST;hr=stream_->Start(stream_->type_);if(FAILED(hr))return hr;started_=true;events_->QueueEventParamVar(MESourceStarted,GUID_NULL,S_OK,nullptr);return hr;}
 HRESULT MediaSource::Stop(){started_=false;stream_->Stop();return events_->QueueEventParamVar(MESourceStopped,GUID_NULL,S_OK,nullptr);}
