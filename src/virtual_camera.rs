@@ -53,7 +53,8 @@ impl VirtualCameraPublisher {
         if mapping.is_null() {
             anyhow::bail!("CreateFileMappingW failed: {}", unsafe { GetLastError() });
         }
-        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, bytes as usize) };\n        let ring = view.Value as *mut FrameRing;
+        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, bytes as usize) };
+        let ring = view.Value as *mut FrameRing;
         if ring.is_null() {
             unsafe { CloseHandle(mapping); }
             anyhow::bail!("MapViewOfFile failed: {}", unsafe { GetLastError() });
