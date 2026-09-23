@@ -76,6 +76,10 @@ struct CameraApp {
     ar_enabled: bool,
     virtual_webcam: bool,
     last_process_ms: f32,
+    auto_tune_enabled: bool,
+    auto_tune_default_enabled: bool,
+    auto_tune_interval_minutes: u32,
+    last_auto_tune: Instant,
     face_boxes: Vec<(f32, f32, f32, f32, f32)>,
     face_landmarks: Vec<Vec<[f32; 3]>>,
     ar_object: usize,
@@ -112,6 +116,10 @@ impl CameraApp {
             ar_enabled: false,
             virtual_webcam: false,
             last_process_ms: 0.0,
+            auto_tune_enabled: false,
+            auto_tune_default_enabled: false,
+            auto_tune_interval_minutes: 2,
+            last_auto_tune: Instant::now(),
             face_boxes: Vec::new(),
             face_landmarks: Vec::new(),
             ar_object: 0,
@@ -177,6 +185,10 @@ impl CameraApp {
         }
 
         if let Some((raw, capture_ms)) = latest {
+            if self.auto_tune_enabled && self.last_auto_tune.elapsed() >= Duration::from_secs(self.auto_tune_interval_minutes.max(1) as u64 * 60) {
+                self.tuning = auto_tune(&raw);
+                self.last_auto_tune = Instant::now();
+            }
             let start = Instant::now();
             let enhanced = enhance(&raw, &self.tuning);
             #[cfg(windows)]
@@ -317,7 +329,15 @@ impl eframe::App for CameraApp {
                         self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() };
                     }
                 });
-                ui.small("Auto Tune uses the current frame; run it again when lighting changes.");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.auto_tune_enabled, "Auto Tune every");
+                    ui.add_enabled(self.auto_tune_enabled, egui::DragValue::new(&mut self.auto_tune_interval_minutes).range(1..=60).suffix(" min"));
+                });
+                ui.checkbox(&mut self.auto_tune_default_enabled, "Use Auto Tune by default");
+                if self.auto_tune_enabled && self.last_auto_tune.elapsed() >= Duration::from_secs(self.auto_tune_interval_minutes.max(1) as u64 * 60) {
+                    self.last_auto_tune = Instant::now();
+                }
+                ui.small("Automatic tuning updates the image parameters from the newest frame at the selected interval. Default interval: 2 minutes.");
                 ui.separator();
                 ui.heading("AR & virtual camera");
                 if ui.checkbox(&mut self.ar_enabled, "Face AR overlay").changed() {
