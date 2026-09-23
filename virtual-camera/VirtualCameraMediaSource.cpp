@@ -3,8 +3,8 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mferror.h>
-#include <mfvirtualcamera.h>
 #include <string>
+#include <strsafe.h>
 #include <ks.h>
 #include <ksmedia.h>
 #include <atomic>
@@ -14,7 +14,6 @@
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "mfsensorgroup.lib")
 #pragma comment(lib, "advapi32.lib")
 
 // Synthetic Media Foundation virtual-camera source.
@@ -74,7 +73,7 @@ public:
 
 class MediaSource;
 
-class MediaStream final : public IMFMediaStream, public IMFMediaStream2 {
+class MediaStream final : public IMFMediaStream {
     std::atomic<ULONG> refs_{1};
     MediaSource* source_;
     IMFMediaEventQueue* events_=nullptr;
@@ -100,8 +99,6 @@ public:
     HRESULT QueueEvent(MediaEventType t,REFGUID g,HRESULT h,const PROPVARIANT* v) override { return events_->QueueEventParamVar(t,g,h,v); }
     HRESULT GetMediaSource(IMFMediaSource** s) override;
     HRESULT GetStreamDescriptor(IMFStreamDescriptor** d) override { if(!d)return E_POINTER; *d=descriptor_; return descriptor_?descriptor_->AddRef(),S_OK:E_UNEXPECTED; }
-    HRESULT SetStreamState(MF_STREAM_STATE state) override { if(state==MF_STREAM_STATE_RUNNING) return Start(type_); if(state==MF_STREAM_STATE_STOPPED) return Stop(); return MF_E_INVALID_STATE_TRANSITION; }
-    HRESULT GetStreamState(MF_STREAM_STATE* state) override { if(!state)return E_POINTER; *state=running_?MF_STREAM_STATE_RUNNING:MF_STREAM_STATE_STOPPED; return S_OK; }
 };
 
 class MediaSource final : public IMFMediaSource {
@@ -129,7 +126,7 @@ public:
     MediaStream* stream(){return stream_;}
 };
 
-HRESULT MediaStream::QueryInterface(REFIID riid,void** ppv){if(!ppv)return E_POINTER;*ppv=nullptr;if(riid==IID_IUnknown||riid==IID_IMFMediaStream){*ppv=static_cast<IMFMediaStream*>(this);AddRef();return S_OK;}if(riid==IID_IMFMediaStream2){*ppv=static_cast<IMFMediaStream2*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
+HRESULT MediaStream::QueryInterface(REFIID riid,void** ppv){if(!ppv)return E_POINTER;*ppv=nullptr;if(riid==IID_IUnknown||riid==IID_IMFMediaStream){*ppv=static_cast<IMFMediaStream*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
 HRESULT MediaStream::GetMediaSource(IMFMediaSource** s){if(!s)return E_POINTER;*s=reinterpret_cast<IMFMediaSource*>(source_);source_->AddRef();return S_OK;}
 HRESULT MediaStream::Initialize(){
     HRESULT hr=MFCreateEventQueue(&events_); if(FAILED(hr))return hr;
@@ -227,15 +224,4 @@ extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllUnregisterServer()
     wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
     std::wstring key=L"Software\\Classes\\CLSID\\"+std::wstring(clsid); LONG rc=RegDeleteTreeW(HKEY_CURRENT_USER,key.c_str());
     return rc==ERROR_FILE_NOT_FOUND?S_OK:HRESULT_FROM_WIN32(rc);
-}
-extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera() {
-    HRESULT hr=DllRegisterServer(); if(FAILED(hr))return hr; hr=MFStartup(MF_VERSION); if(FAILED(hr))return hr;
-    IMFVirtualCamera* vc=nullptr; wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
-    hr=MFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource,MFVirtualCameraLifetime_System,MFVirtualCameraAccess_CurrentUser,L"4K Rust Camera",clsid,nullptr,0,&vc);
-    if(SUCCEEDED(hr))hr=vc->Start(nullptr); if(vc)vc->Release(); MFShutdown(); return hr;
-}
-extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Unregister4KRustCamera() {
-    HRESULT hr=S_OK; MFStartup(MF_VERSION); IMFVirtualCamera* vc=nullptr; wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
-    if(SUCCEEDED(MFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource,MFVirtualCameraLifetime_System,MFVirtualCameraAccess_CurrentUser,L"4K Rust Camera",clsid,nullptr,0,&vc))){hr=vc->Remove();vc->Release();}
-    MFShutdown(); if(SUCCEEDED(hr))hr=DllUnregisterServer(); return hr;
 }
