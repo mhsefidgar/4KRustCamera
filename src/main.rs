@@ -82,6 +82,7 @@ struct CameraApp {
     last_auto_tune: Instant,
     face_boxes: Vec<(f32, f32, f32, f32, f32)>,
     face_landmarks: Vec<Vec<[f32; 3]>>,
+    ar_layout: usize,
     ar_object: usize,
     ar_scale: f32,
     ar_status: String,
@@ -122,6 +123,7 @@ impl CameraApp {
             last_auto_tune: Instant::now(),
             face_boxes: Vec::new(),
             face_landmarks: Vec::new(),
+            ar_layout: 0,
             ar_object: 0,
             ar_scale: 1.0,
             ar_status: "AR off".to_owned(),
@@ -347,7 +349,16 @@ impl eframe::App for CameraApp {
                 ui.label(format!("Status: {}", self.ar_status));
                 if self.ar_enabled {
                     ui.horizontal(|ui| {
-                        ui.label("3D object");
+                        ui.label("AR layout");
+                        egui::ComboBox::from_id_salt("ar_layout")
+                            .selected_text(match self.ar_layout { 1 => "3D Effects", _ => "Face AR" })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.ar_layout, 0, "Face AR");
+                                ui.selectable_value(&mut self.ar_layout, 1, "3D Effects");
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("3D effect");
                         egui::ComboBox::from_id_salt("ar_object")
                             .selected_text(match self.ar_object { 1 => "Glasses", 2 => "Crown", 3 => "Cube", _ => "None" })
                             .show_ui(ui, |ui| {
@@ -358,7 +369,7 @@ impl eframe::App for CameraApp {
                             });
                     });
                     if self.ar_object != 0 {
-                        ui.add(egui::Slider::new(&mut self.ar_scale, 0.5..=1.8).text("Object scale"));
+                        ui.add(egui::Slider::new(&mut self.ar_scale, 0.5..=1.8).text("3D effect scale"));
                     }
                 }
                 ui.small("MediaPipe BlazeFace runs on a reduced preview frame; the 4K enhancement path is not replaced.");
