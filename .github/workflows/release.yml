@@ -1,8 +1,9 @@
-name: windows-x64-release
+name: windows-x64
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -13,26 +14,34 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-msvc
-      - name: Download lightweight AI model
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/models | Out-Null
-          Invoke-WebRequest -Uri "https://huggingface.co/huggingworld/onnx-image-models/resolve/main/002_lightweightSR_DIV2K_s64w8_SwinIR-S_x2.onnx?download=true" -OutFile "dist/models/swin2SR-lightweight-x2-64.onnx"
+
       - name: Package
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/4k-rust-camera.exe" "dist/4k-rust-camera.exe"
           Copy-Item README.md dist/README.md
           Compress-Archive -Path dist/* -DestinationPath "4k-rust-camera-windows-x64.zip" -Force
+
+      - name: Upload CI artifact
+        if: startsWith(github.ref, 'refs/heads/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: 4k-rust-camera-windows-x64
+          path: 4k-rust-camera-windows-x64.zip
+
       - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0
-          name: 4K Rust Camera v0.1.0
+          tag_name: ${{ github.ref_name }}
+          name: 4K Rust Camera ${{ github.ref_name }}
           generate_release_notes: true
           files: 4k-rust-camera-windows-x64.zip
