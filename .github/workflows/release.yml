@@ -20,9 +20,13 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: Build virtual camera DLL
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           msbuild virtual-camera/VirtualCameraMediaSource.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:OutDir="$pwd\\dist\\" 
 
       - name: Build Rust application
