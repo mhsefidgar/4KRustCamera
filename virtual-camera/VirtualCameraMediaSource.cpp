@@ -204,11 +204,11 @@ public:
     HRESULT LockServer(BOOL)override{return S_OK;}
 };
 
-static HRESULT STDMETHODCALLTYPE DllGetClassObjectImpl(REFCLSID clsid,REFIID riid,void**ppv){
+extern "C" HRESULT STDMETHODCALLTYPE DllGetClassObjectImpl(REFCLSID clsid,REFIID riid,void**ppv){
     if(clsid!=CLSID_4KRustCameraVirtualSource)return CLASS_E_CLASSNOTAVAILABLE;
     Factory*f=new(std::nothrow)Factory();if(!f)return E_OUTOFMEMORY;HRESULT hr=f->QueryInterface(riid,ppv);f->Release();return hr;
 }
-static HRESULT STDMETHODCALLTYPE DllCanUnloadNowImpl(){return S_FALSE;}
+extern "C" HRESULT STDMETHODCALLTYPE DllCanUnloadNowImpl(){return S_FALSE;}
 BOOL APIENTRY DllMain(HMODULE hModule,DWORD reason,LPVOID){ if(reason==DLL_PROCESS_ATTACH){g_module=hModule; DisableThreadLibraryCalls(hModule);} return TRUE; }
 
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllRegisterServer() {
