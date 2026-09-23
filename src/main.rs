@@ -441,7 +441,7 @@ impl eframe::App for CameraApp {
                         let painter = ui.painter_at(rect);
                         for (x, y, w, h, score) in &self.face_boxes {
                             let r = egui::Rect::from_min_size(rect.min + egui::vec2(*x * sx, *y * sy), egui::vec2(*w * sx, *h * sy));
-                            painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
+                            painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
                             painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE {:.0}%", score * 100.0), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
                             draw_ar_object(&painter, r, self.ar_object, self.ar_scale);
                         }
@@ -562,11 +562,11 @@ fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: 
                 egui::pos2(cx + lens_w + gap, cy),
                 egui::vec2(lens_w, lens_h),
             );
-            painter.rect_stroke(left, 8.0, egui::Stroke::new(3.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
-            painter.rect_stroke(right, 8.0, egui::Stroke::new(3.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
-            painter.line_segment([egui::pos2(left.right(), cy), egui::pos2(right.left(), cy)], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([egui::pos2(left.left(), cy), egui::pos2(left.left() - w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([egui::pos2(right.right(), cy), egui::pos2(right.right() + w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            painter.rect_stroke(left, 8.0, egui::Stroke::new(3.0_f32, egui::Color32::WHITE), egui::StrokeKind::Outside);
+            painter.rect_stroke(right, 8.0, egui::Stroke::new(3.0_f32, egui::Color32::WHITE), egui::StrokeKind::Outside);
+            painter.line_segment([egui::pos2(left.right(), cy), egui::pos2(right.left(), cy)], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
+            painter.line_segment([egui::pos2(left.left(), cy), egui::pos2(left.left() - w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
+            painter.line_segment([egui::pos2(right.right(), cy), egui::pos2(right.right() + w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
         }
         2 => {
             let base_y = r.top() - h * 0.05;
@@ -580,9 +580,9 @@ fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: 
                 egui::pos2(cx + w * 0.42, base_y),
             ];
             for pair in pts.windows(2) {
-                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(4.0, egui::Color32::WHITE));
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(4.0_f32, egui::Color32::WHITE));
             }
-            painter.line_segment([pts[0], pts[6]], egui::Stroke::new(4.0, egui::Color32::WHITE));
+            painter.line_segment([pts[0], pts[6]], egui::Stroke::new(4.0_f32, egui::Color32::WHITE));
         }
         3 => {
             let depth = w * 0.10;
@@ -590,16 +590,16 @@ fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: 
             let left = egui::pos2(cx - w * 0.24, cy - h * 0.08);
             let right = egui::pos2(cx + w * 0.24, cy - h * 0.08);
             let bottom = egui::pos2(cx, cy + h * 0.22);
-            painter.line_segment([top, left], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([top, right], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([left, bottom], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([right, bottom], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            painter.line_segment([top, left], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
+            painter.line_segment([top, right], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
+            painter.line_segment([left, bottom], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
+            painter.line_segment([right, bottom], egui::Stroke::new(3.0_f32, egui::Color32::WHITE));
             let o = egui::vec2(depth, -depth);
             for (a, b) in [(top, left), (top, right), (left, bottom), (right, bottom)] {
-                painter.line_segment([a + o, b + o], egui::Stroke::new(2.0, egui::Color32::WHITE));
+                painter.line_segment([a + o, b + o], egui::Stroke::new(2.0_f32, egui::Color32::WHITE));
             }
             for p in [top, left, right, bottom] {
-                painter.line_segment([p, p + o], egui::Stroke::new(2.0, egui::Color32::WHITE));
+                painter.line_segment([p, p + o], egui::Stroke::new(2.0_f32, egui::Color32::WHITE));
             }
         }
         _ => {}
@@ -710,7 +710,6 @@ fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Re
     loop {
         if let Ok(CameraCommand::Select(new_index)) = cmd_rx.try_recv() {
             camera.stop_stream().ok();
-            selected = new_index.clone();
             match Camera::new(new_index, RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)) {
                 Ok(mut new_camera) => match new_camera.open_stream() {
                     Ok(()) => camera = new_camera,
