@@ -80,7 +80,6 @@ struct CameraApp {
     auto_tune_interval_minutes: u32,
     last_auto_tune: Instant,
     face_boxes: Vec<(f32, f32, f32, f32, f32)>,
-    ar_layout: usize,
     ar_object: usize,
     ar_scale: f32,
     ar_status: String,
@@ -119,7 +118,6 @@ impl CameraApp {
             auto_tune_interval_minutes: 2,
             last_auto_tune: Instant::now(),
             face_boxes: Vec::new(),
-            ar_layout: 0,
             ar_object: 0,
             ar_scale: 1.0,
             ar_status: "AR off".to_owned(),
@@ -345,15 +343,6 @@ impl eframe::App for CameraApp {
                 ui.label(format!("Status: {}", self.ar_status));
                 if self.ar_enabled {
                     ui.horizontal(|ui| {
-                        ui.label("AR layout");
-                        egui::ComboBox::from_id_salt("ar_layout")
-                            .selected_text(match self.ar_layout { 1 => "3D Effects", _ => "Face AR" })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.ar_layout, 0, "Face AR");
-                                ui.selectable_value(&mut self.ar_layout, 1, "3D Effects");
-                            });
-                    });
-                    ui.horizontal(|ui| {
                         ui.label("3D effect");
                         egui::ComboBox::from_id_salt("ar_object")
                             .selected_text(match self.ar_object { 1 => "Glasses", 2 => "Crown", 3 => "Cube", _ => "None" })
@@ -439,7 +428,7 @@ impl eframe::App for CameraApp {
                             let r = egui::Rect::from_min_size(rect.min + egui::vec2(*x * sx, *y * sy), egui::vec2(*w * sx, *h * sy));
                             painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
                             painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE {:.0}%", score * 100.0), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
-                            draw_ar_object(&painter, r, self.ar_layout, self.ar_object, self.ar_scale);
+                            draw_ar_object(&painter, r, self.ar_object, self.ar_scale);
                         }
                     }
                 }
@@ -539,8 +528,8 @@ fn model_path() -> PathBuf {
     let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     p.pop(); p.push("models"); p.push("blaze_face_short_range.tflite"); p
 }
-fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, layout: usize, object: usize, scale: f32) {
-    if layout == 0 || object == 0 { return; }
+fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: f32) {
+    if object == 0 { return; }
 
     // The detector currently supplies a face box, so these effects use a stable
     // face-local coordinate system and a perspective projection rather than
