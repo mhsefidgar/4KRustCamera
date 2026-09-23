@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
+#include <mfvirtualcamera.h>
 #include <mferror.h>
 #include <string>
 #include <strsafe.h>
@@ -13,6 +14,7 @@
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "mfsensorgroup.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
 
@@ -210,6 +212,36 @@ extern "C" HRESULT STDAPICALLTYPE DllGetClassObject(REFCLSID clsid,REFIID riid,v
 }
 extern "C" HRESULT STDAPICALLTYPE DllCanUnloadNow(){return S_FALSE;}
 BOOL APIENTRY DllMain(HMODULE hModule,DWORD reason,LPVOID){ if(reason==DLL_PROCESS_ATTACH){g_module=hModule; DisableThreadLibraryCalls(hModule);} return TRUE; }
+
+extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera() {
+    wchar_t sourceId[64]{};
+    StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
+    IMFVirtualCamera* camera = nullptr;
+    HRESULT hr = MFCreateVirtualCamera(
+        MFVirtualCameraType_SoftwareCameraSource,
+        MFVirtualCameraLifetime_System,
+        MFVirtualCameraAccess_CurrentUser,
+        L"4K Rust Camera", sourceId, nullptr, 0, &camera);
+    if (FAILED(hr)) return hr;
+    hr = camera->Start(nullptr);
+    camera->Release();
+    return hr;
+}
+
+extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Unregister4KRustCamera() {
+    wchar_t sourceId[64]{};
+    StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
+    IMFVirtualCamera* camera = nullptr;
+    HRESULT hr = MFCreateVirtualCamera(
+        MFVirtualCameraType_SoftwareCameraSource,
+        MFVirtualCameraLifetime_System,
+        MFVirtualCameraAccess_CurrentUser,
+        L"4K Rust Camera", sourceId, nullptr, 0, &camera);
+    if (FAILED(hr)) return hr;
+    hr = camera->Remove();
+    camera->Release();
+    return hr;
+}
 
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllRegisterServer() {
     wchar_t module[MAX_PATH]{}; if(!GetModuleFileNameW(g_module,module,MAX_PATH)) return HRESULT_FROM_WIN32(GetLastError());
