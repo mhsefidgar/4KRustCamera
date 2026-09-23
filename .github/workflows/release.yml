@@ -41,7 +41,6 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath "4k-rust-camera-windows-x64.zip" -Force
 
       - name: Upload CI artifact
-        if: startsWith(github.ref, 'refs/heads/')
         uses: actions/upload-artifact@v4
         with:
           name: 4k-rust-camera-windows-x64
