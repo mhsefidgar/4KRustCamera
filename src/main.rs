@@ -356,7 +356,7 @@ impl eframe::App for CameraApp {
                     self.last_auto_tune = Instant::now();
                 }
                 ui.small("Automatic tuning updates the image parameters from the newest frame at the selected interval. Default interval: 2 minutes.");
-                ui.separator();
+                });
                 ui.separator();
                 ui.collapsing("Face AR", |ui| {
                 if ui.checkbox(&mut self.ar_enabled, "Enable face AR").changed() {
