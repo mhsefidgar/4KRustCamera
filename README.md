@@ -1,32 +1,50 @@
 # 4K Rust Camera
 
-A Windows x64 realtime camera application built around Windows Media Foundation through nokhwa, with a low-latency enhancement pipeline and a side-by-side baseline comparison.
+A Windows x64 realtime camera application built around the native Windows camera backend through nokhwa.
 
-## Improvements
+## Current realtime improvements
 
-- Realtime capture on the native Windows Media Foundation backend.
-- Parallel image pipeline: exposure, tone mapping, contrast, saturation, warmth, shadow lift, highlight recovery, denoise and edge-aware sharpening.
-- User-adjustable tuning parameters.
-- Bounded frame queue so processing cannot accumulate unbounded latency.
-- Baseline-vs-enhanced comparison mode.
-- FPS and per-frame capture/enhancement timing.
-- Optional lightweight AI model package for offline detail experiments without putting a large neural network into the realtime 4K path.
+- Low-latency frame queue: the UI drains pending frames and processes only the newest frame, avoiding growing capture latency.
+- Parallel CPU image processing for exposure, highlight recovery, shadow lift, contrast, saturation, warmth, denoise and sharpening.
+- Adjustable tuning controls with a one-click reset.
+- Baseline comparison: the left pane is the decoded camera frame before this application's enhancement.
+- Realtime FPS plus capture/decode and enhancement timing.
+- Visible camera error reporting instead of silently printing failures.
+- Portable Windows x64 packaging through GitHub Actions.
 
-## Lightweight model
+## Important performance design
 
-The release package includes models/swin2SR-lightweight-x2-64.onnx, sourced from the Hugging Face ONNX model collection. The model is intentionally not executed on every 4K frame: its small tile-oriented super-resolution architecture is better suited to optional detail/snapshot work than full-resolution realtime processing.
+The realtime path deliberately does **not** run super-resolution on every 4K frame. A neural x2 super-resolution model at full 4K would add substantial memory bandwidth and inference latency and would work against the low-latency goal.
 
-The release uses the lightweight SwinIR/Swin2SR family listed by Hugging Face.
+The intended AI architecture is:
+
+1. Realtime CPU/GPU-friendly enhancement on every frame.
+2. Optional lightweight ONNX super-resolution on selected small tiles or stills.
+3. AI inference must be explicitly enabled and measured before being advertised as realtime.
+
+This repository currently packages the realtime classical enhancement path. It does **not** claim that ONNX inference is active until an ONNX Runtime backend is merged and benchmarked.
 
 ## Baseline comparison
 
-The left pane is the decoded camera frame before this application's enhancement. This is a reproducible camera-pipeline baseline; it is not a claim that it reproduces the Microsoft Camera app's private processing stack.
+"Baseline" means the decoded camera frame received by this application. It is not a capture of the Microsoft Camera app and does not reproduce Microsoft's private processing stack.
 
 ## Build
 
-Run cargo build --release for a local build. GitHub Actions builds x86_64-pc-windows-msvc and packages a portable ZIP.
+Local Windows build:
 
-Windows 10/11 x64. Camera permission must be enabled in Windows Settings.
+```powershell
+cargo build --release
+```
+
+GitHub Actions builds `x86_64-pc-windows-msvc` on Windows Server 2022.
+
+Pushes to `main` produce a downloadable CI artifact. A tag such as `v0.2.0` produces a GitHub Release containing the Windows x64 ZIP.
+
+Windows 10/11 x64. Camera permissions must be enabled in Windows Settings.
+
+## AI model research
+
+The lightweight SwinIR/Swin2SR ONNX family was identified on Hugging Face for optional tile/snapshot enhancement. The exact model file and license should be pinned in the release manifest before enabling inference.
 
 ## License
 
