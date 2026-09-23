@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/4k-rust-camera.exe" "dist/4k-rust-camera.exe"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/k4-rust-camera.exe" "dist/4k-rust-camera.exe"
           Copy-Item README.md dist/README.md
           Compress-Archive -Path dist/* -DestinationPath "4k-rust-camera-windows-x64.zip" -Force
 
