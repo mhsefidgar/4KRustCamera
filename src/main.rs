@@ -87,7 +87,7 @@ impl CameraApp {
             pair: None,
             raw_texture: None,
             enhanced_texture: None,
-            compare: true,
+            compare: false,
             frozen: false,
             last_frame: Instant::now(),
             fps: 0.0,
@@ -199,11 +199,6 @@ impl eframe::App for CameraApp {
                 ui.checkbox(&mut self.compare, "A/B compare");
                 ui.checkbox(&mut self.frozen, "Freeze");
                 ui.checkbox(&mut self.show_stats, "Stats");
-                ui.separator();
-                if ui.button(if self.virtual_webcam { "Virtual Webcam: ON" } else { "Enable Virtual Webcam" }).clicked() {
-                    self.virtual_webcam = !self.virtual_webcam;
-                    self.error = Some("Virtual webcam integration requires the Windows 11 Media Foundation virtual-camera component; this button is reserved for the system camera bridge.".to_owned());
-                }
             });
         });
 
@@ -212,7 +207,7 @@ impl eframe::App for CameraApp {
             .default_width(285.0)
             .min_width(250.0)
             .show(ctx, |ui| {
-                ui.heading("Camera controls");
+                ui.heading("Camera");
                 ui.small("Live enhancement pipeline");
                 ui.separator();
                 ui.label("Camera");
@@ -250,6 +245,11 @@ impl eframe::App for CameraApp {
                     ui.label("Mode");
                     ui.monospace("Highest FPS");
                 });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.strong("Output");
+                    ui.small(if self.compare { "A/B comparison" } else { "Enhanced only" });
+                });
                 ui.separator();
                 ui.heading("Image tuning");
                 ui.add(egui::Slider::new(&mut self.tuning.exposure, -1.0..=1.0).text("Exposure"));
@@ -268,17 +268,24 @@ impl eframe::App for CameraApp {
                     egui::Slider::new(&mut self.tuning.shadow_lift, 0.0..=0.5).text("Shadows"),
                 );
 
-                ui.horizontal(|ui| {
-                    if ui.button("Reset").clicked() { self.tuning = Tuning::default(); }
-                    if ui.button("Neutral").clicked() { self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() }; }
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Auto Tune").clicked() {
                         if let Some(pair) = &self.pair { self.tuning = auto_tune(&pair.raw); }
                     }
+                    if ui.button("Reset").clicked() { self.tuning = Tuning::default(); }
+                    if ui.button("Neutral").clicked() {
+                        self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() };
+                    }
                 });
+                ui.small("Auto Tune uses the current frame; run it again when lighting changes.");
                 ui.separator();
-                ui.heading("Augmented reality");
+                ui.heading("AR & virtual camera");
                 ui.checkbox(&mut self.ar_enabled, "Face AR overlay");
-                ui.small("Prepared for native face landmarks and glTF overlays; tracker integration is kept separate from the low-latency image path.");
+                ui.small("AR uses a separate processing stage so the base camera path remains low-latency.");
+                ui.add_enabled_ui(false, |ui| {
+                    ui.button("Register 4K Rust Virtual Camera");
+                });
+                ui.small("Windows 11 virtual cameras require a registered Media Foundation media-source component; registration alone cannot stream this app's frames.");
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
@@ -323,7 +330,7 @@ impl eframe::App for CameraApp {
                         cols[1].image((enhanced.id(), egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.88))));
                     });
                 } else {
-                    ui.label(egui::RichText::new("ENHANCED REALTIME FEED").strong());
+                    ui.label(egui::RichText::new("ENHANCED · REALTIME").strong());
                     let avail = ui.available_size();
                     let ratio = enhanced.size_vec2().y / enhanced.size_vec2().x;
                     ui.image((enhanced.id(), egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.92))));
