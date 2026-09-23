@@ -3,10 +3,10 @@ use image::RgbImage;
 use std::{mem::size_of, ptr, slice};
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
+    Foundation::{CloseHandle, FreeLibrary, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
     System::{
-        LibraryLoader::{FreeLibrary, GetProcAddress, LoadLibraryW},
-        Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
+        LibraryLoader::{GetProcAddress, LoadLibraryW},
+        Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
         Performance::QueryPerformanceCounter,
         Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
     },
@@ -53,21 +53,21 @@ impl VirtualCameraPublisher {
         if mapping.is_null() {
             anyhow::bail!("CreateFileMappingW failed: {}", unsafe { GetLastError() });
         }
-        let ring = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, bytes as usize) as *mut FrameRing };
+        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, bytes as usize) };\n        let ring = view.Value as *mut FrameRing;
         if ring.is_null() {
             unsafe { CloseHandle(mapping); }
             anyhow::bail!("MapViewOfFile failed: {}", unsafe { GetLastError() });
         }
         let mutex = unsafe { CreateMutexW(ptr::null(), 0, MUTEX.as_ptr()) };
         if mutex.is_null() {
-            unsafe { UnmapViewOfFile(ring as *const _); CloseHandle(mapping); }
+            unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: ring as *mut _ }); CloseHandle(mapping); }
             anyhow::bail!("CreateMutexW failed: {}", unsafe { GetLastError() });
         }
         Ok(Self { mapping, mutex, ring, sequence: 0 })
     }
 
     pub fn publish(&mut self, rgb: &RgbImage) -> Result<()> {
-        let mut frame = image::imageops::resize(rgb, WIDTH, HEIGHT, image::imageops::FilterType::Triangle);
+        let frame = image::imageops::resize(rgb, WIDTH, HEIGHT, image::imageops::FilterType::Triangle);
         let wait = unsafe { WaitForSingleObject(self.mutex, 100) };
         if wait != WAIT_OBJECT_0 { anyhow::bail!("virtual-camera frame mutex timeout"); }
 
@@ -103,7 +103,7 @@ impl VirtualCameraPublisher {
 impl Drop for VirtualCameraPublisher {
     fn drop(&mut self) {
         unsafe {
-            if !self.ring.is_null() { UnmapViewOfFile(self.ring as *const _); }
+            if !self.ring.is_null() { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ring as *mut _ }); }
             if !self.mutex.is_null() { CloseHandle(self.mutex); }
             if !self.mapping.is_null() { CloseHandle(self.mapping); }
         }
@@ -117,7 +117,7 @@ pub fn call_registration(register: bool) -> Result<()> {
     unsafe {
         let module = LoadLibraryW(wide.as_ptr());
         if module.is_null() { anyhow::bail!("LoadLibraryW failed: {}", GetLastError()); }
-        let name = if register { b"Register4KRustCamera\0" } else { b"Unregister4KRustCamera\0" };
+        let name: &[u8] = if register { b"Register4KRustCamera\0" } else { b"Unregister4KRustCamera\0" };
         let proc = GetProcAddress(module, name.as_ptr());
         if proc.is_none() { FreeLibrary(module); anyhow::bail!("virtual-camera registration export is missing"); }
         type Fn = unsafe extern "system" fn() -> i32;
