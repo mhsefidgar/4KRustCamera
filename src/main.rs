@@ -699,7 +699,7 @@ fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Re
 
     let requested =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-    let mut selected = available[0].0.clone();
+    let selected = available[0].0.clone();
     let mut camera = Camera::new(selected.clone(), requested)?;
     camera.open_stream()?;
 
