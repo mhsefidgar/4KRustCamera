@@ -342,10 +342,18 @@ impl eframe::App for CameraApp {
                     }
                 }
                 ui.small("MediaPipe BlazeFace runs on a reduced preview frame; the 4K enhancement path is not replaced.");
-                if ui.button("Register 4K Rust Virtual Camera").clicked() {
-                    self.error = Some("Virtual-camera registration still needs the Media Foundation custom media-source DLL. MFCreateVirtualCamera can register a source, but Windows will not invent the frame-producing COM component for this app.".to_owned());
+                #[cfg(windows)] {
+                    ui.checkbox(&mut self.virtual_webcam, "Publish enhanced frames to virtual camera");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Register virtual camera").clicked() {
+                            match virtual_camera::call_registration(true) { Ok(()) => self.error=None, Err(e) => self.error=Some(format!("{e:#}")) }
+                        }
+                        if ui.button("Unregister virtual camera").clicked() {
+                            match virtual_camera::call_registration(false) { Ok(()) => self.virtual_webcam=false, Err(e) => self.error=Some(format!("{e:#}")) }
+                        }
+                    });
                 }
-                ui.small("The control is active so the state is explicit. The remaining work is the Windows Media Foundation source component that supplies processed frames.");
+                ui.small("The virtual camera uses a Windows Media Foundation custom source backed by a shared-memory frame ring.");
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
