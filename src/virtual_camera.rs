@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use image::RgbImage;
 use std::{mem::size_of, ptr, slice};
+use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
     System::{
+        LibraryLoader::{FreeLibrary, GetProcAddress, LoadLibraryW},
         Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
         Performance::QueryPerformanceCounter,
         Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
@@ -106,4 +108,23 @@ impl Drop for VirtualCameraPublisher {
             if !self.mapping.is_null() { CloseHandle(self.mapping); }
         }
     }
+}
+
+pub fn call_registration(register: bool) -> Result<()> {
+    let mut path = std::env::current_exe().context("current executable path")?;
+    path.set_file_name("4KRustCameraVirtualCamera.dll");
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe {
+        let module = LoadLibraryW(wide.as_ptr());
+        if module.is_null() { anyhow::bail!("LoadLibraryW failed: {}", GetLastError()); }
+        let name = if register { b"Register4KRustCamera\0" } else { b"Unregister4KRustCamera\0" };
+        let proc = GetProcAddress(module, name.as_ptr());
+        if proc.is_none() { FreeLibrary(module); anyhow::bail!("virtual-camera registration export is missing"); }
+        type Fn = unsafe extern "system" fn() -> i32;
+        let f: Fn = std::mem::transmute(proc);
+        let hr = f();
+        FreeLibrary(module);
+        if hr < 0 { anyhow::bail!("virtual-camera registration failed: HRESULT 0x{:08X}", hr as u32); }
+    }
+    Ok(())
 }
