@@ -9,7 +9,7 @@ use nokhwa::{
 };
 use rayon::prelude::*;
 use std::{path::PathBuf, thread, time::{Duration, Instant}};
-use mediapipe::{FaceLandmarker, Image as MpImage, ModelSource};
+use mediapipe::{FaceDetector, Image as MpImage, ModelSource, IouThreshold};
 
 #[derive(Clone, Debug)]
 struct Tuning {
@@ -81,13 +81,13 @@ struct CameraApp {
     ar_scale: f32,
     ar_status: String,
     ar_tx: Sender<RgbImage>,
-    ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, Vec<Vec<[f32; 3]>>, String)>,
+    ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, String)>,
 }
 
 impl CameraApp {
     fn new(rx: Receiver<CameraEvent>, camera_tx: Sender<CameraCommand>) -> Self {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
-        let (worker_tx, ar_rx) = bounded::<(Vec<(f32, f32, f32, f32, f32)>, Vec<Vec<[f32; 3]>>, String)>(2);
+        let (worker_tx, ar_rx) = bounded::<(Vec<(f32, f32, f32, f32, f32)>, String)>(2);
         thread::spawn(move || face_ai_worker(worker_rx, worker_tx));
         Self {
             rx,
@@ -166,9 +166,8 @@ impl CameraApp {
             }
         }
 
-        while let Ok((boxes, landmarks, status)) = self.ar_rx.try_recv() {
+        while let Ok((boxes, status)) = self.ar_rx.try_recv() {
             self.face_boxes = boxes;
-            self.face_landmarks = landmarks;
             self.ar_status = status;
         }
 
@@ -394,6 +393,7 @@ impl eframe::App for CameraApp {
                             let r = egui::Rect::from_min_size(rect.min + egui::vec2(*x * sx, *y * sy), egui::vec2(*w * sx, *h * sy));
                             painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
                             painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE {:.0}%", score * 100.0), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
+                            draw_ar_object(&painter, r, self.ar_object, self.ar_scale);
                         }
                     }
                 }
@@ -425,9 +425,13 @@ fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<(f32, f32, f32, f32, f
     let mut detector = match FaceDetector::builder(ModelSource::path(&model))
         .min_detection_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
         .min_suppression_threshold(IouThreshold::new(0.3).expect("valid IoU threshold"))
-        .build() {
+        .build()
+    {
         Ok(d) => d,
-        Err(e) => { let _ = tx.send((Vec::new(), format!("AR model load failed: {e}"))); return; }
+        Err(e) => {
+            let _ = tx.send((Vec::new(), format!("AR model load failed: {e}")));
+            return;
+        }
     };
     let _ = tx.send((Vec::new(), "AR ready".to_owned()));
     while let Ok(src) = rx.recv() {
@@ -435,9 +439,14 @@ fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<(f32, f32, f32, f32, f
         let small = if src.width() > max_w {
             let h = ((src.height() as f32) * max_w as f32 / src.width() as f32) as u32;
             image::imageops::resize(&src, max_w, h.max(1), image::imageops::FilterType::Triangle)
-        } else { src.clone() };
+        } else {
+            src.clone()
+        };
         let temp = std::env::temp_dir().join("4k-rust-camera-ar.png");
-        if let Err(e) = small.save(&temp) { let _ = tx.try_send((Vec::new(), format!("AR frame preparation failed: {e}"))); continue; }
+        if let Err(e) = small.save(&temp) {
+            let _ = tx.try_send((Vec::new(), format!("AR frame preparation failed: {e}")));
+            continue;
+        }
         let result: Result<Vec<(f32, f32, f32, f32, f32)>> = (|| {
             let image = MpImage::from_file(&temp)?;
             let detections = detector.detect(&image)?;
@@ -446,13 +455,24 @@ fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<(f32, f32, f32, f32, f
             Ok(detections.into_iter().map(|face| {
                 let bb = face.bounding_box;
                 let score = face.score().map(|v| v.get()).unwrap_or(0.0);
-                (bb.left() as f32 * sx, bb.top() as f32 * sy, bb.width() as f32 * sx, bb.height() as f32 * sy, score)
+                (
+                    bb.left() as f32 * sx,
+                    bb.top() as f32 * sy,
+                    bb.width() as f32 * sx,
+                    bb.height() as f32 * sy,
+                    score,
+                )
             }).collect())
         })();
         let _ = std::fs::remove_file(&temp);
         match result {
-            Ok(boxes) => { let count = boxes.len(); let _ = tx.try_send((boxes, format!("AR active · {} face(s)", count))); }
-            Err(e) => { let _ = tx.try_send((Vec::new(), format!("AR inference failed: {e}"))); }
+            Ok(boxes) => {
+                let count = boxes.len();
+                let _ = tx.try_send((boxes, format!("AR active · {} face(s)", count)));
+            }
+            Err(e) => {
+                let _ = tx.try_send((Vec::new(), format!("AR inference failed: {e}")));
+            }
         }
     }
 }
@@ -473,6 +493,69 @@ fn model_path() -> PathBuf {
     let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     p.pop(); p.push("models"); p.push("blaze_face_short_range.tflite"); p
 }
+fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: f32) {
+    if object == 0 { return; }
+    let cx = r.center().x;
+    let cy = r.top() + r.height() * 0.46;
+    let w = r.width() * scale;
+    let h = r.height() * scale;
+    match object {
+        1 => {
+            let lens_w = w * 0.28;
+            let lens_h = h * 0.14;
+            let gap = w * 0.045;
+            let left = egui::Rect::from_center_size(
+                egui::pos2(cx - lens_w - gap, cy),
+                egui::vec2(lens_w, lens_h),
+            );
+            let right = egui::Rect::from_center_size(
+                egui::pos2(cx + lens_w + gap, cy),
+                egui::vec2(lens_w, lens_h),
+            );
+            painter.rect_stroke(left, 8.0, egui::Stroke::new(3.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
+            painter.rect_stroke(right, 8.0, egui::Stroke::new(3.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
+            painter.line_segment([egui::pos2(left.right(), cy), egui::pos2(right.left(), cy)], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            painter.line_segment([egui::pos2(left.left(), cy), egui::pos2(left.left() - w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            painter.line_segment([egui::pos2(right.right(), cy), egui::pos2(right.right() + w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0, egui::Color32::WHITE));
+        }
+        2 => {
+            let base_y = r.top() - h * 0.05;
+            let pts = [
+                egui::pos2(cx - w * 0.34, base_y),
+                egui::pos2(cx - w * 0.18, base_y - h * 0.22),
+                egui::pos2(cx - w * 0.03, base_y),
+                egui::pos2(cx + w * 0.08, base_y - h * 0.30),
+                egui::pos2(cx + w * 0.22, base_y),
+                egui::pos2(cx + w * 0.38, base_y - h * 0.16),
+                egui::pos2(cx + w * 0.42, base_y),
+            ];
+            for pair in pts.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(4.0, egui::Color32::WHITE));
+            }
+            painter.line_segment([pts[0], pts[6]], egui::Stroke::new(4.0, egui::Color32::WHITE));
+        }
+        3 => {
+            let depth = w * 0.10;
+            let top = egui::pos2(cx, cy - h * 0.20);
+            let left = egui::pos2(cx - w * 0.24, cy - h * 0.08);
+            let right = egui::pos2(cx + w * 0.24, cy - h * 0.08);
+            let bottom = egui::pos2(cx, cy + h * 0.22);
+            painter.line_segment([top, left], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            painter.line_segment([top, right], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            painter.line_segment([left, bottom], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            painter.line_segment([right, bottom], egui::Stroke::new(3.0, egui::Color32::WHITE));
+            let o = egui::vec2(depth, -depth);
+            for (a, b) in [(top, left), (top, right), (left, bottom), (right, bottom)] {
+                painter.line_segment([a + o, b + o], egui::Stroke::new(2.0, egui::Color32::WHITE));
+            }
+            for p in [top, left, right, bottom] {
+                painter.line_segment([p, p + o], egui::Stroke::new(2.0, egui::Color32::WHITE));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn auto_tune(src: &RgbImage) -> Tuning {
     let mut sum = 0.0f64;
     let mut r_sum = 0.0f64;
