@@ -9,7 +9,7 @@ use nokhwa::{
 };
 use rayon::prelude::*;
 use std::{path::PathBuf, thread, time::{Duration, Instant}};
-use mediapipe::{FaceDetector, IouThreshold, Image as MpImage, ModelSource};
+use mediapipe::{FaceLandmarker, Image as MpImage, ModelSource};
 
 #[derive(Clone, Debug)]
 struct Tuning {
@@ -76,15 +76,18 @@ struct CameraApp {
     virtual_webcam: bool,
     last_process_ms: f32,
     face_boxes: Vec<(f32, f32, f32, f32, f32)>,
+    face_landmarks: Vec<Vec<[f32; 3]>>,
+    ar_object: usize,
+    ar_scale: f32,
     ar_status: String,
     ar_tx: Sender<RgbImage>,
-    ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, String)>,
+    ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, Vec<Vec<[f32; 3]>>, String)>,
 }
 
 impl CameraApp {
     fn new(rx: Receiver<CameraEvent>, camera_tx: Sender<CameraCommand>) -> Self {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
-        let (worker_tx, ar_rx) = bounded::<(Vec<(f32, f32, f32, f32, f32)>, String)>(2);
+        let (worker_tx, ar_rx) = bounded::<(Vec<(f32, f32, f32, f32, f32)>, Vec<Vec<[f32; 3]>>, String)>(2);
         thread::spawn(move || face_ai_worker(worker_rx, worker_tx));
         Self {
             rx,
@@ -107,6 +110,9 @@ impl CameraApp {
             virtual_webcam: false,
             last_process_ms: 0.0,
             face_boxes: Vec::new(),
+            face_landmarks: Vec::new(),
+            ar_object: 0,
+            ar_scale: 1.0,
             ar_status: "AR off".to_owned(),
             ar_tx,
             ar_rx,
@@ -160,8 +166,9 @@ impl CameraApp {
             }
         }
 
-        while let Ok((boxes, status)) = self.ar_rx.try_recv() {
+        while let Ok((boxes, landmarks, status)) = self.ar_rx.try_recv() {
             self.face_boxes = boxes;
+            self.face_landmarks = landmarks;
             self.ar_status = status;
         }
 
@@ -308,6 +315,22 @@ impl eframe::App for CameraApp {
                     else { self.face_boxes.clear(); self.ar_status = "AR off".to_owned(); }
                 }
                 ui.label(format!("Status: {}", self.ar_status));
+                if self.ar_enabled {
+                    ui.horizontal(|ui| {
+                        ui.label("3D object");
+                        egui::ComboBox::from_id_salt("ar_object")
+                            .selected_text(match self.ar_object { 1 => "Glasses", 2 => "Crown", 3 => "Cube", _ => "None" })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.ar_object, 0, "None");
+                                ui.selectable_value(&mut self.ar_object, 1, "Glasses");
+                                ui.selectable_value(&mut self.ar_object, 2, "Crown");
+                                ui.selectable_value(&mut self.ar_object, 3, "Cube");
+                            });
+                    });
+                    if self.ar_object != 0 {
+                        ui.add(egui::Slider::new(&mut self.ar_scale, 0.5..=1.8).text("Object scale"));
+                    }
+                }
                 ui.small("MediaPipe BlazeFace runs on a reduced preview frame; the 4K enhancement path is not replaced.");
                 if ui.button("Register 4K Rust Virtual Camera").clicked() {
                     self.error = Some("Virtual-camera registration still needs the Media Foundation custom media-source DLL. MFCreateVirtualCamera can register a source, but Windows will not invent the frame-producing COM component for this app.".to_owned());
