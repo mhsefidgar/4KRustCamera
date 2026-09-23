@@ -1,7 +1,7 @@
 LIBRARY "4KRustCameraVirtualCamera"
 EXPORTS
-    DllGetClassObject=DllGetClassObjectImpl
-    DllCanUnloadNow=DllCanUnloadNowImpl
+    DllGetClassObject
+    DllCanUnloadNow
     DllRegisterServer
     DllUnregisterServer
     Register4KRustCamera
