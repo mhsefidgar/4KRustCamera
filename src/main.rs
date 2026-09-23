@@ -45,12 +45,20 @@ struct FramePair {
 }
 
 enum CameraEvent {
+    Cameras(Vec<(CameraIndex, String)>),
     Frame(RgbImage, f32),
     Error(String),
 }
 
+enum CameraCommand {
+    Select(CameraIndex),
+}
+
 struct CameraApp {
     rx: Receiver<CameraEvent>,
+    camera_tx: Sender<CameraCommand>,
+    cameras: Vec<(CameraIndex, String)>,
+    selected_camera: usize,
     tuning: Tuning,
     pair: Option<FramePair>,
     raw_texture: Option<egui::TextureHandle>,
@@ -68,9 +76,12 @@ struct CameraApp {
 }
 
 impl CameraApp {
-    fn new(rx: Receiver<CameraEvent>) -> Self {
+    fn new(rx: Receiver<CameraEvent>, camera_tx: Sender<CameraCommand>) -> Self {
         Self {
             rx,
+            camera_tx,
+            cameras: Vec::new(),
+            selected_camera: 0,
             tuning: Tuning::default(),
             pair: None,
             raw_texture: None,
@@ -124,6 +135,12 @@ impl CameraApp {
         let mut latest = None;
         while let Ok(event) = self.rx.try_recv() {
             match event {
+                CameraEvent::Cameras(cameras) => {
+                    self.cameras = cameras;
+                    if self.selected_camera >= self.cameras.len() {
+                        self.selected_camera = 0;
+                    }
+                }
                 CameraEvent::Frame(raw, capture_ms) => latest = Some((raw, capture_ms)),
                 CameraEvent::Error(message) => self.error = Some(message),
             }
@@ -191,10 +208,37 @@ impl eframe::App for CameraApp {
                 ui.heading("Camera controls");
                 ui.small("Live enhancement pipeline");
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Source");
-                    ui.monospace("Windows Camera #0");
-                });
+                ui.label("Camera");
+                if self.cameras.is_empty() {
+                    ui.label("Detecting cameras…");
+                } else {
+                    let current_name = self
+                        .cameras
+                        .get(self.selected_camera)
+                        .map(|(_, name)| name.as_str())
+                        .unwrap_or("Unknown camera");
+                    let mut requested = None;
+                    egui::ComboBox::from_id_salt("camera_selector")
+                        .selected_text(current_name)
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for (index, (_, name)) in self.cameras.iter().enumerate() {
+                                if ui.selectable_label(index == self.selected_camera, name).clicked() {
+                                    requested = Some(index);
+                                }
+                            }
+                        });
+                    if let Some(index) = requested {
+                        self.selected_camera = index;
+                        if let Some((camera_index, _)) = self.cameras.get(index) {
+                            let _ = self.camera_tx.send(CameraCommand::Select(camera_index.clone()));
+                            self.pair = None;
+                            self.raw_texture = None;
+                            self.enhanced_texture = None;
+                            self.error = None;
+                        }
+                    }
+                }
                 ui.horizontal(|ui| {
                     ui.label("Mode");
                     ui.monospace("Highest FPS");
@@ -225,10 +269,6 @@ impl eframe::App for CameraApp {
                         self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() };
                     }
                 });
-
-                if false {
-                    self.tuning = Tuning::default();
-                }
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
@@ -280,7 +320,7 @@ impl eframe::App for CameraApp {
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.heading("Waiting for camera");
-                    ui.label("Opening Windows camera #0 and negotiating the highest available frame rate…");
+                    ui.label("Select a camera above. The app negotiates the highest available frame rate.");
                     if let Some(err) = &self.error {
                         ui.colored_label(egui::Color32::RED, err);
                     }
@@ -372,14 +412,43 @@ fn enhance(src: &RgbImage, t: &Tuning) -> RgbImage {
     out
 }
 
-fn camera_thread(tx: Sender<CameraEvent>) -> Result<()> {
+fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Result<()> {
+    let cameras = nokhwa::query(nokhwa::native_api_backend())?;
+    let mut available = Vec::new();
+    for info in cameras {
+        available.push((info.index().clone(), info.human_name()));
+    }
+    let _ = tx.send(CameraEvent::Cameras(available.clone()));
+
+    if available.is_empty() {
+        return Err(anyhow::anyhow!("No cameras were detected."));
+    }
+
     let requested =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-    let mut camera = Camera::new(CameraIndex::Index(0), requested)?;
-
+    let mut selected = available[0].0.clone();
+    let mut camera = Camera::new(selected.clone(), requested)?;
     camera.open_stream()?;
 
     loop {
+        if let Ok(CameraCommand::Select(new_index)) = cmd_rx.try_recv() {
+            camera.stop_stream().ok();
+            selected = new_index.clone();
+            match Camera::new(new_index, RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)) {
+                Ok(mut new_camera) => match new_camera.open_stream() {
+                    Ok(()) => camera = new_camera,
+                    Err(e) => {
+                        let _ = tx.send(CameraEvent::Error(format!("Could not open selected camera: {e:#}")));
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    let _ = tx.send(CameraEvent::Error(format!("Could not create selected camera: {e:#}")));
+                    continue;
+                }
+            }
+        }
+
         let start = Instant::now();
         let frame = camera.frame()?;
         let decoded = frame.decode_image::<RgbFormat>()?;
@@ -395,9 +464,10 @@ fn camera_thread(tx: Sender<CameraEvent>) -> Result<()> {
 
 fn main() {
     let (tx, rx) = bounded::<CameraEvent>(2);
+    let (camera_tx, camera_rx) = bounded::<CameraCommand>(2);
 
     thread::spawn(move || {
-        if let Err(e) = camera_thread(tx.clone()) {
+        if let Err(e) = camera_thread(tx.clone(), camera_rx) {
             let _ = tx.send(CameraEvent::Error(format!("{e:#}")));
         }
     });
@@ -413,6 +483,6 @@ fn main() {
     let _ = eframe::run_native(
         "4K Rust Camera",
         options,
-        Box::new(|_cc| Ok(Box::new(CameraApp::new(rx)))),
+        Box::new(|_cc| Ok(Box::new(CameraApp::new(rx, camera_tx)))),
     );
 }
