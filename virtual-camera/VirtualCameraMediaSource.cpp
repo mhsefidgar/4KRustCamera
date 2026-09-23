@@ -206,7 +206,19 @@ class Factory final : public IClassFactory {
 public:
     HRESULT QueryInterface(REFIID riid,void**ppv)override{if(!ppv)return E_POINTER;*ppv=nullptr;if(riid==IID_IUnknown||riid==IID_IClassFactory){*ppv=this;AddRef();return S_OK;}return E_NOINTERFACE;}
     ULONG AddRef()override{return ++refs_;} ULONG Release()override{ULONG n=--refs_;if(!n)delete this;return n;}
-    HRESULT CreateInstance(IUnknown*,REFIID riid,void**ppv)override{if(!ppv)return E_POINTER;*ppv=nullptr;Activate*a=new(std::nothrow)Activate();if(!a)return E_OUTOFMEMORY;HRESULT hr=a->Initialize();if(SUCCEEDED(hr))hr=a->QueryInterface(riid,ppv);a->Release();return hr;}
+    HRESULT CreateInstance(IUnknown* outer,REFIID riid,void**ppv)override{
+        if(!ppv)return E_POINTER; *ppv=nullptr;
+        if(outer)return CLASS_E_NOAGGREGATION;
+        // FrameServer may request IMFActivate or the media-source interface
+        // directly. Support both activation contracts.
+        Activate* a=new(std::nothrow)Activate(); if(!a)return E_OUTOFMEMORY;
+        HRESULT hr=a->Initialize();
+        if(SUCCEEDED(hr) && (riid==IID_IMFActivate || riid==IID_IMFAttributes))
+            hr=a->QueryInterface(riid,ppv);
+        else if(SUCCEEDED(hr))
+            hr=a->ActivateObject(riid,ppv);
+        a->Release(); return hr;
+    }
     HRESULT LockServer(BOOL)override{return S_OK;}
 };
 
