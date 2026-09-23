@@ -206,28 +206,43 @@ public:
     HRESULT LockServer(BOOL)override{return S_OK;}
 };
 
-extern "C" HRESULT STDAPICALLTYPE DllGetClassObject(REFCLSID clsid,REFIID riid,void**ppv){
+extern "C" HRESULT STDAPICALLTYPE DllGetClassObject(REFCLSID clsid, REFIID riid, void** ppv){
     if(clsid!=CLSID_4KRustCameraVirtualSource)return CLASS_E_CLASSNOTAVAILABLE;
     Factory*f=new(std::nothrow)Factory();if(!f)return E_OUTOFMEMORY;HRESULT hr=f->QueryInterface(riid,ppv);f->Release();return hr;
 }
 extern "C" HRESULT STDAPICALLTYPE DllCanUnloadNow(){return S_FALSE;}
 BOOL APIENTRY DllMain(HMODULE hModule,DWORD reason,LPVOID){ if(reason==DLL_PROCESS_ATTACH){g_module=hModule; DisableThreadLibraryCalls(hModule);} return TRUE; }
 
-extern "C" HRESULT STDMETHODCALLTYPE DllRegisterServer();
-extern "C" HRESULT STDMETHODCALLTYPE DllUnregisterServer();
+extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllRegisterServer() {
+    wchar_t module[MAX_PATH]{}; if(!GetModuleFileNameW(g_module,module,MAX_PATH)) return HRESULT_FROM_WIN32(GetLastError());
+    wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
+    std::wstring key=L"Software\\\\Classes\\\\CLSID\\\\"+std::wstring(clsid)+L"\\\\InprocServer32"; HKEY h=nullptr;
+    LONG rc=RegCreateKeyExW(HKEY_CURRENT_USER,key.c_str(),0,nullptr,0,KEY_SET_VALUE,nullptr,&h,nullptr); if(rc!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(rc);
+    rc=RegSetValueExW(h,nullptr,0,REG_SZ,reinterpret_cast<const BYTE*>(module),(DWORD)((wcslen(module)+1)*sizeof(wchar_t)));
+    if(rc==ERROR_SUCCESS){const wchar_t* tm=L"Both";rc=RegSetValueExW(h,L"ThreadingModel",0,REG_SZ,reinterpret_cast<const BYTE*>(tm),(DWORD)((wcslen(tm)+1)*sizeof(wchar_t)));}
+    RegCloseKey(h); return HRESULT_FROM_WIN32(rc);
+}
+extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllUnregisterServer() {
+    wchar_t clsid[64]{}; StringFromGUID2(CLSID_4KRustCameraVirtualSource,clsid,64);
+    std::wstring key=L"Software\\\\Classes\\\\CLSID\\\\"+std::wstring(clsid); LONG rc=RegDeleteTreeW(HKEY_CURRENT_USER,key.c_str());
+    return rc==ERROR_FILE_NOT_FOUND?S_OK:HRESULT_FROM_WIN32(rc);
+}
 
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera() {
+    HRESULT hr = MFStartup(MF_VERSION);
+    if (FAILED(hr)) return hr;
     wchar_t sourceId[64]{};
     StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
     IMFVirtualCamera* camera = nullptr;
-    HRESULT hr = MFCreateVirtualCamera(
+    hr = MFCreateVirtualCamera(
         MFVirtualCameraType_SoftwareCameraSource,
         MFVirtualCameraLifetime_System,
         MFVirtualCameraAccess_CurrentUser,
         L"4K Rust Camera", sourceId, nullptr, 0, &camera);
     if (FAILED(hr)) return hr;
-    hr = camera->Start(nullptr);
-    camera->Release();
+    if (SUCCEEDED(hr)) hr = camera->Start(nullptr);
+    if (camera) camera->Release();
+    MFShutdown();
     return hr;
 }
 
