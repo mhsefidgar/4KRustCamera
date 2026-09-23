@@ -9,6 +9,7 @@ use nokhwa::{
 };
 use rayon::prelude::*;
 use std::{path::PathBuf, thread, time::{Duration, Instant}};
+#[cfg(windows)] mod virtual_camera;
 use mediapipe::{FaceDetector, Image as MpImage, ModelSource, IouThreshold};
 
 #[derive(Clone, Debug)]
@@ -80,6 +81,8 @@ struct CameraApp {
     ar_object: usize,
     ar_scale: f32,
     ar_status: String,
+    #[cfg(windows)]
+    virtual_camera_publisher: Option<virtual_camera::VirtualCameraPublisher>,
     ar_tx: Sender<RgbImage>,
     ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, String)>,
 }
@@ -114,6 +117,8 @@ impl CameraApp {
             ar_object: 0,
             ar_scale: 1.0,
             ar_status: "AR off".to_owned(),
+            #[cfg(windows)]
+            virtual_camera_publisher: virtual_camera::VirtualCameraPublisher::open().ok(),
             ar_tx,
             ar_rx,
         }
@@ -174,6 +179,12 @@ impl CameraApp {
         if let Some((raw, capture_ms)) = latest {
             let start = Instant::now();
             let enhanced = enhance(&raw, &self.tuning);
+            #[cfg(windows)]
+            if self.virtual_webcam {
+                if let Some(publisher) = &mut self.virtual_camera_publisher {
+                    if let Err(e) = publisher.publish(&enhanced) { self.error = Some(format!("Virtual camera IPC: {e:#}")); }
+                }
+            }
             let process_ms = start.elapsed().as_secs_f32() * 1000.0;
             if self.ar_enabled {
                 let _ = self.ar_tx.try_send(raw.clone());
