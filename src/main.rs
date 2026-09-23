@@ -194,7 +194,7 @@ impl CameraApp {
             }
             let start = Instant::now();
             let mut enhanced = enhance(&raw, &self.tuning);
-            if self.ar_enabled && self.ar_object != 0 { for track in &self.face_tracks { draw_ar_object_image(&mut enhanced, track, self.ar_object, self.ar_scale); } }
+            if self.ar_enabled && self.ar_object != 0 { for track in &self.face_tracks { draw_ar_object_image(&mut enhanced, track.bbox.0, track.bbox.1, track.bbox.2, track.bbox.3, self.ar_object, self.ar_scale); } }
             #[cfg(windows)]
             if self.virtual_webcam {
                 if let Some(publisher) = &mut self.virtual_camera_publisher {
@@ -519,7 +519,7 @@ fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<FaceTrack>, String)>) 
         .num_faces(std::num::NonZeroU32::new(4).expect("non-zero"))
         .min_face_detection_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
         .min_face_presence_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
-        .min_tracking_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
+        .min_tracking_confidence(mediapipe::IouThreshold::new(0.5).expect("valid IoU threshold"))
         .output_blendshapes(true)
         .output_transformation_matrixes(true)
         .build_for_video()
@@ -550,8 +550,8 @@ fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<FaceTrack>, String)>) 
             let sx = src.width() as f32 / small.width().max(1) as f32;
             let sy = src.height() as f32 / small.height().max(1) as f32;
             Ok(result.landmarks.into_iter().map(|face| {
-                let points: Vec<(f32, f32, f32)> = face.iter().map(|p| (p.x(), p.y(), p.z())).collect();
-                let (mut min_x, mut min_y, mut max_x, mut max_y) = (1.0, 1.0, 0.0, 0.0);
+                let points: Vec<(f32, f32, f32)> = face.iter().map(|p| (p.point.x(), p.point.y(), p.point.z())).collect();
+                let (mut min_x, mut min_y, mut max_x, mut max_y): (f32, f32, f32, f32) = (1.0, 1.0, 0.0, 0.0);
                 for &(x,y,_) in &points { min_x=min_x.min(x); min_y=min_y.min(y); max_x=max_x.max(x); max_y=max_y.max(y); }
                 FaceTrack {
                     bbox: (min_x * small.width() as f32 * sx, min_y * small.height() as f32 * sy,
@@ -681,8 +681,8 @@ fn draw_ar_object_image(img: &mut RgbImage, x:f32,y:f32,w:f32,h:f32,object:usize
     let cx=x+w*0.5; let cy=y+h*0.45; let s=scale.clamp(0.5,1.8); let ww=w*s; let hh=h*s;
     match object {
       1 => { let lw=ww*0.27; let lh=hh*0.13; let gap=ww*0.045; let l=(cx-lw-gap,cy); let r=(cx+lw+gap,cy); for &(a,b,c,d) in &[(l.0-lw,l.1-lh,l.0,l.1-lh),(l.0,l.1-lh,l.0,l.1+lh),(l.0,l.1+lh,l.0-lw,l.1+lh),(r.0,r.1-lh,r.0+lw,r.1-lh),(r.0+lw,r.1-lh,r.0+lw,r.1+lh),(r.0+lw,r.1+lh,r.0,r.1+lh)] { line(img,a as i32,b as i32,c as i32,d as i32); } line(img,l.0 as i32,cy as i32,r.0 as i32,cy as i32); }
-      2 => { let base=cy-hh*0.38; let p=[(cx-ww*.40,base),(cx-ww*.25,base-hh*.24),(cx-ww*.08,base),(cx+ww*.08,base-hh*.31),(cx+ww*.25,base),(cx+ww*.40,base-hh*.20),(cx+ww*.44,base)]; let d=(ww*.045,-hh*.07); for q in p.windows(2){line(img,q[0].0 as i32,q[0].1 as i32,q[1].0 as i32,q[1].1 as i32); line(img,(q[0].0+d.0) as i32,(q[0].1+d.1) as i32,(q[1].0+d.0) as i32,(q[1].1+d.1) as i32);} for &i in &[0usize,2,4,6]{line(img,p[i].0 as i32,p[i].1 as i32,(p[i].0+d.0) as i32,(p[i].1+d.1) as i32);} }
-      3 => { let q=ww.min(hh)*.18; let d=(q*.42,-q*.42); let p=[(cx-q,cy-q),(cx+q,cy-q),(cx+q,cy+q),(cx-q,cy+q)]; for i in 0..4{let a=p[i];let b=p[(i+1)%4];line(img,a.0 as i32,a.1 as i32,b.0 as i32,b.1 as i32);line(img,(a.0+d.0) as i32,(a.1+d.1) as i32,(b.0+d.0) as i32,(b.1+d.1) as i32);line(img,a.0 as i32,a.1 as i32,(a.0+d.0) as i32,(a.1+d.1) as i32);} }
+      2 => { let base=cy-hh*0.38; let p=[(cx-ww*0.40,base),(cx-ww*0.25,base-hh*0.24),(cx-ww*0.08,base),(cx+ww*0.08,base-hh*0.31),(cx+ww*0.25,base),(cx+ww*0.40,base-hh*0.20),(cx+ww*0.44,base)]; let d=(ww*0.045,-hh*0.07); for q in p.windows(2){line(img,q[0].0 as i32,q[0].1 as i32,q[1].0 as i32,q[1].1 as i32); line(img,(q[0].0+d.0) as i32,(q[0].1+d.1) as i32,(q[1].0+d.0) as i32,(q[1].1+d.1) as i32);} for &i in &[0usize,2,4,6]{line(img,p[i].0 as i32,p[i].1 as i32,(p[i].0+d.0) as i32,(p[i].1+d.1) as i32);} }
+      3 => { let q=ww.min(hh)*0.18; let d=(q*0.42,-q*0.42); let p=[(cx-q,cy-q),(cx+q,cy-q),(cx+q,cy+q),(cx-q,cy+q)]; for i in 0..4{let a=p[i];let b=p[(i+1)%4];line(img,a.0 as i32,a.1 as i32,b.0 as i32,b.1 as i32);line(img,(a.0+d.0) as i32,(a.1+d.1) as i32,(b.0+d.0) as i32,(b.1+d.1) as i32);line(img,a.0 as i32,a.1 as i32,(a.0+d.0) as i32,(a.1+d.1) as i32);} }
       _ => {}
     }
 }
