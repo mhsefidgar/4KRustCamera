@@ -52,7 +52,7 @@ public:
         if (!ring_) return MF_E_NOT_INITIALIZED;
         if (width != VC_WIDTH || height != VC_HEIGHT) return MF_E_INVALIDMEDIATYPE;
         for (int attempt=0; attempt<4; ++attempt) {
-            const uint64_t s1 = ring_->header.sequence;
+            const uint64_t s1 = static_cast<uint64_t>(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(&ring_->header.sequence), 0, 0));
             if (s1 == 0 || (s1 & 1)) { Sleep(0); continue; }
             const uint32_t srcStride = ring_->header.stride;
             const uint32_t srcHeight = ring_->header.height;
@@ -60,7 +60,7 @@ public:
             for (UINT32 y=0; y<height; ++y) {
                 CopyMemory(dst + y*pitch, ring_->pixels + y*srcStride, width*4);
             }
-            const uint64_t s2 = ring_->header.sequence;
+            const uint64_t s2 = static_cast<uint64_t>(InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(&ring_->header.sequence), 0, 0));
             if (s1 == s2 && !(s2 & 1)) return S_OK;
         }
         return MF_E_AGAIN;
@@ -77,6 +77,7 @@ class MediaStream final : public IMFMediaStream {
     IMFMediaType* type_=nullptr;
     FrameReader reader_;
     bool running_=false;
+    friend class MediaSource;
 public:
     MediaStream(MediaSource* s):source_(s){}
     ~MediaStream(){ Shutdown(); SafeRelease(&events_); SafeRelease(&descriptor_); SafeRelease(&type_); }
