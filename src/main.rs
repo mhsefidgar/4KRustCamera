@@ -70,6 +70,8 @@ struct CameraApp {
     nextface_status: String,
     nextface_tx: Sender<String>,
     nextface_rx: Receiver<String>,
+    face_sample_tx: Sender<String>,
+    face_sample_rx: Receiver<String>,
     face_samples: Vec<(String, String)>,
     selected_face_sample: usize,
     face_sample_status: String,
@@ -81,6 +83,7 @@ impl CameraApp {
         let (worker_tx, ar_rx) = bounded::<(Vec<FaceTrack>, String)>(2);
         ar::spawn_worker(worker_rx, worker_tx);
         let (nextface_tx, nextface_rx) = bounded::<String>(2);
+        let (face_sample_tx, face_sample_rx) = bounded::<String>(2);
         Self {
             rx,
             camera_tx,
@@ -117,6 +120,8 @@ impl CameraApp {
             nextface_status: "NextFace idle".to_owned(),
             nextface_tx,
             nextface_rx,
+            face_sample_tx,
+            face_sample_rx,
             face_samples: vec![
                 ("Historic portrait — man".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/Portrait_of_a_man,_facing_front,_image_framed_by_gold_and_red_decorative_motif_LCCN2016653262.jpg".to_owned()),
                 ("Historic portrait — woman".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/African_American_woman,_head-and-shoulders_portrait,_facing_front_LCCN99472177.jpg".to_owned()),
@@ -180,6 +185,9 @@ impl CameraApp {
         }
         while let Ok(status) = self.nextface_rx.try_recv() {
             self.nextface_status = status;
+        }
+        while let Ok(status) = self.face_sample_rx.try_recv() {
+            self.face_sample_status = status;
         }
 
         if let Some((raw, capture_ms)) = latest {
@@ -463,7 +471,7 @@ impl eframe::App for CameraApp {
                             let safe = name.to_lowercase().replace(' ', "-").replace('—', "-").replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "");
                             let path = dir.join(format!("{safe}.jpg"));
                             self.face_sample_status = format!("Downloading {name}…");
-                            let status_tx = self.nextface_tx.clone();
+                            let status_tx = self.face_sample_tx.clone();
                             thread::spawn(move || {
                                 let result = (|| -> Result<()> {
                                     std::fs::create_dir_all(&dir)?;
