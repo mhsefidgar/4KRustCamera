@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use image::RgbImage;
 use rayon::prelude::*;
-use std::{mem::size_of, ptr, slice};
+use std::{mem::size_of, ptr, slice, path::PathBuf};
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::{
     Foundation::{CloseHandle, FreeLibrary, GetLastError, LocalFree, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
@@ -9,7 +9,7 @@ use windows_sys::Win32::{
         LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH},
         Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
         Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
-        Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+        Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject, GetExitCodeProcess},
     },
     Security::{SECURITY_ATTRIBUTES, Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1}},
     UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW},
@@ -195,7 +195,7 @@ fn elevate_regsvr32(register: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn call_registration(register: bool) -> Result<()> {
+pub fn call_registration(register: bool) -> Result<()> {\n    // The FrameServer loads the media source out-of-process, so its COM class\n    // must be registered system-wide. Perform that privileged operation first.\n    elevate_regsvr32(register)?;
     let mut path = std::env::current_exe().context("current executable path")?;
     path.set_file_name("4KRustCameraVirtualCamera.dll");
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
