@@ -222,11 +222,16 @@ impl CameraApp {
                 self.last_auto_tune = Instant::now();
             }
             let start = Instant::now();
-            let enhanced = enhance(&raw, &self.tuning);
+            let mut enhanced = enhance(&raw, &self.tuning);
+            if self.ar_enabled && !self.face_tracks.is_empty() {
+                draw_ar_overlay(&mut enhanced, &self.face_tracks);
+            }
             #[cfg(windows)]
             if self.virtual_webcam {
                 if let Some(publisher) = &mut self.virtual_camera_publisher {
                     if let Err(e) = publisher.publish(&enhanced) { self.error = Some(format!("Virtual camera IPC: {e:#}")); }
+                } else {
+                    self.error = Some("Virtual camera is enabled but the frame publisher is unavailable.".to_owned());
                 }
             }
             let process_ms = start.elapsed().as_secs_f32() * 1000.0;
@@ -623,6 +628,40 @@ impl eframe::App for CameraApp {
     }
 }
 
+
+fn draw_ar_overlay(image: &mut RgbImage, tracks: &[FaceTrack]) {
+    let color = image::Rgb([0, 255, 0]);
+    for track in tracks {
+        let (x, y, w, h) = track.bbox;
+        draw_line(image, x as i32, y as i32, (x + w) as i32, y as i32, color);
+        draw_line(image, x as i32, (y + h) as i32, (x + w) as i32, (y + h) as i32, color);
+        draw_line(image, x as i32, y as i32, x as i32, (y + h) as i32, color);
+        draw_line(image, (x + w) as i32, y as i32, (x + w) as i32, (y + h) as i32, color);
+        for &(lx, ly, _) in &track.landmarks {
+            let px = (lx * image.width() as f32) as i32;
+            let py = (ly * image.height() as f32) as i32;
+            for dx in -1..=1 { for dy in -1..=1 {
+                let xx = px + dx; let yy = py + dy;
+                if xx >= 0 && yy >= 0 && (xx as u32) < image.width() && (yy as u32) < image.height() {
+                    image.put_pixel(xx as u32, yy as u32, color);
+                }
+            }}
+        }
+    }
+}
+
+fn draw_line(image: &mut RgbImage, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: image::Rgb<u8>) {
+    let dx = (x1 - x0).abs(); let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs(); let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as u32) < image.width() && (y0 as u32) < image.height() { image.put_pixel(x0 as u32, y0 as u32, color); }
+        if x0 == x1 && y0 == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x0 += sx; }
+        if e2 <= dx { err += dx; y0 += sy; }
+    }
+}
 
 fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Result<()> {
     let cameras = nokhwa::query(nokhwa::native_api_backend().ok_or_else(|| anyhow::anyhow!("No camera backend is available on this system."))?)?;
