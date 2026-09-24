@@ -309,6 +309,18 @@ static HRESULT RegisterVirtualCameraInternal(bool remove) {
     return hr;
 }
 
+extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Check4KRustCameraSupport() {
+    HRESULT hr = MFStartup(MF_VERSION);
+    if (FAILED(hr)) return hr;
+
+    BOOL supported = FALSE;
+    hr = MFIsVirtualCameraTypeSupported(MFVirtualCameraType_SoftwareCameraSource, &supported);
+    if (SUCCEEDED(hr) && !supported) hr = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+
+    MFShutdown();
+    return hr;
+}
+
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera() {
     return RegisterVirtualCameraInternal(false);
 }
