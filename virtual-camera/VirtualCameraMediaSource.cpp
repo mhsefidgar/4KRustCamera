@@ -244,45 +244,75 @@ extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllUnregisterServer() {
     return rc==ERROR_FILE_NOT_FOUND?S_OK:HRESULT_FROM_WIN32(rc);
 }
 
-extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera() {
+static HRESULT RegisterVirtualCameraInternal(bool remove) {
     HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) return hr;
-    wchar_t sourceId[64]{};
-    StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
-    IMFVirtualCamera* camera = nullptr;
-    // Register the COM class before creating the virtual camera. MF uses
-    // sourceId to activate this exact IMFMediaSource implementation.
-    hr = DllRegisterServer();
+
+    BOOL supported = FALSE;
+    hr = MFIsVirtualCameraTypeSupported(MFVirtualCameraType_SoftwareCameraSource, &supported);
     if (FAILED(hr)) {
         MFShutdown();
         return hr;
     }
+    if (!supported) {
+        MFShutdown();
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
+
+    wchar_t sourceId[64]{};
+    if (!StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64)) {
+        MFShutdown();
+        return E_FAIL;
+    }
+
+    IMFVirtualCamera* camera = nullptr;
+
+    if (!remove) {
+        // Register the COM class before creating the virtual camera. MF uses
+        // sourceId to activate this exact IMFMediaSource implementation.
+        hr = DllRegisterServer();
+        if (FAILED(hr)) {
+            MFShutdown();
+            return hr;
+        }
+
+        hr = MFCreateVirtualCamera(
+            MFVirtualCameraType_SoftwareCameraSource,
+            MFVirtualCameraLifetime_System,
+            MFVirtualCameraAccess_CurrentUser,
+            L"4K Rust Camera", sourceId, nullptr, 0, &camera);
+        if (FAILED(hr)) {
+            MFShutdown();
+            return hr;
+        }
+
+        hr = camera->Start(nullptr);
+        if (camera) camera->Release();
+        MFShutdown();
+        return hr;
+    }
+
     hr = MFCreateVirtualCamera(
         MFVirtualCameraType_SoftwareCameraSource,
         MFVirtualCameraLifetime_System,
         MFVirtualCameraAccess_CurrentUser,
         L"4K Rust Camera", sourceId, nullptr, 0, &camera);
-    if (FAILED(hr)) return hr;
-    if (SUCCEEDED(hr)) hr = camera->Start(nullptr);
+    if (SUCCEEDED(hr)) {
+        hr = camera->Remove();
+    }
     if (camera) camera->Release();
     MFShutdown();
+
+    if (SUCCEEDED(hr)) {
+        hr = DllUnregisterServer();
+    }
     return hr;
 }
 
+extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Register4KRustCamera() {
+    return RegisterVirtualCameraInternal(false);
+}
+
 extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE Unregister4KRustCamera() {
-    HRESULT hr = MFStartup(MF_VERSION);
-    if (FAILED(hr)) return hr;
-    wchar_t sourceId[64]{};
-    StringFromGUID2(CLSID_4KRustCameraVirtualSource, sourceId, 64);
-    IMFVirtualCamera* camera = nullptr;
-    hr = MFCreateVirtualCamera(
-        MFVirtualCameraType_SoftwareCameraSource,
-        MFVirtualCameraLifetime_System,
-        MFVirtualCameraAccess_CurrentUser,
-        L"4K Rust Camera", sourceId, nullptr, 0, &camera);
-    if (SUCCEEDED(hr)) hr = camera->Remove();
-    if (camera) camera->Release();
-    MFShutdown();
-    if (SUCCEEDED(hr)) hr = DllUnregisterServer();
-    return hr;
+    return RegisterVirtualCameraInternal(true);
 }
