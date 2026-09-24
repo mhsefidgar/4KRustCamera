@@ -17,33 +17,6 @@ use image_pipeline::{auto_tune, enhance, Tuning};
 use nextface::{FaceMesh, HeadPose};
 #[cfg(windows)] mod virtual_camera;
 
-#[derive(Clone, Debug)]
-struct Tuning {
-    exposure: f32,
-    contrast: f32,
-    saturation: f32,
-    sharpness: f32,
-    denoise: f32,
-    warmth: f32,
-    highlight_recovery: f32,
-    shadow_lift: f32,
-}
-
-impl Default for Tuning {
-    fn default() -> Self {
-        Self {
-            exposure: 0.0,
-            contrast: 1.08,
-            saturation: 1.06,
-            sharpness: 0.45,
-            denoise: 0.15,
-            warmth: 0.0,
-            highlight_recovery: 0.25,
-            shadow_lift: 0.08,
-        }
-    }
-}
-
 struct FramePair {
     raw: RgbImage,
     enhanced: RgbImage,
