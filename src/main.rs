@@ -47,9 +47,14 @@ struct FramePair {
 }
 
 #[derive(Clone, Debug)]
+struct FaceMesh {
+    vertices: Vec<[f32; 3]>,
+    faces: Vec<[usize; 3]>,
+}
+
+#[derive(Clone, Debug)]
 struct FaceTrack {
     bbox: (f32, f32, f32, f32),
-    confidence: f32,
     landmarks: Vec<(f32, f32, f32)>,
 }
 
@@ -87,8 +92,7 @@ struct CameraApp {
     auto_tune_interval_minutes: u32,
     last_auto_tune: Instant,
     face_tracks: Vec<FaceTrack>,
-    ar_object: usize,
-    ar_scale: f32,
+    nextface_mesh: Option<FaceMesh>,
     ar_status: String,
     #[cfg(windows)]
     virtual_camera_publisher: Option<virtual_camera::VirtualCameraPublisher>,
@@ -130,8 +134,7 @@ impl CameraApp {
             auto_tune_interval_minutes: 2,
             last_auto_tune: Instant::now(),
             face_tracks: Vec::new(),
-            ar_object: 1,
-            ar_scale: 1.0,
+            nextface_mesh: None,
             ar_status: "AR off".to_owned(),
             #[cfg(windows)]
             virtual_camera_publisher: virtual_camera::VirtualCameraPublisher::open().ok(),
@@ -206,7 +209,6 @@ impl CameraApp {
             }
             let start = Instant::now();
             let mut enhanced = enhance(&raw, &self.tuning);
-            if self.ar_enabled && self.ar_object != 0 { for track in &self.face_tracks { draw_ar_object_image(&mut enhanced, track.bbox.0, track.bbox.1, track.bbox.2, track.bbox.3, self.ar_object, self.ar_scale); } }
             #[cfg(windows)]
             if self.virtual_webcam {
                 if let Some(publisher) = &mut self.virtual_camera_publisher {
@@ -371,40 +373,12 @@ impl eframe::App for CameraApp {
                 });
                 ui.separator();
                 ui.collapsing("Face AR", |ui| {
-                if ui.checkbox(&mut self.ar_enabled, "Enable face AR").changed() {
-                    if self.ar_enabled { self.ar_status = "Starting MediaPipe Face Landmarker…".to_owned(); }
-                    else { self.face_tracks.clear(); self.ar_status = "AR off".to_owned(); }
-                }
-                ui.label(format!("Status: {}", self.ar_status));
-                if self.ar_enabled {
-                    ui.horizontal(|ui| {
-                        ui.label("3D effect");
-                        egui::ComboBox::from_id_salt("ar_object")
-                            .selected_text(match self.ar_object { 1 => "Glasses", 2 => "Crown", 3 => "Cube", _ => "None" })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.ar_object, 0, "None");
-                                ui.selectable_value(&mut self.ar_object, 1, "Glasses");
-                                ui.selectable_value(&mut self.ar_object, 2, "Crown");
-                                ui.selectable_value(&mut self.ar_object, 3, "Cube");
-                            });
-                    });
-                    if self.ar_object != 0 {
-                        ui.add(egui::Slider::new(&mut self.ar_scale, 0.5..=1.8).text("3D effect scale"));
+                    if ui.checkbox(&mut self.ar_enabled, "Enable face tracking").changed() {
+                        if self.ar_enabled { self.ar_status = "Starting MediaPipe Face Landmarker…".to_owned(); }
+                        else { self.face_tracks.clear(); self.ar_status = "AR off".to_owned(); }
                     }
-                }
-                ui.small("MediaPipe Face Landmarker runs on a reduced preview frame and supplies dense landmarks; the 4K enhancement path remains separate.");
-                #[cfg(windows)] {
-                    ui.checkbox(&mut self.virtual_webcam, "Publish enhanced frames to virtual camera");
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Register virtual camera").clicked() {
-                            match virtual_camera::call_registration(true) { Ok(()) => self.error=None, Err(e) => self.error=Some(format!("{e:#}")) }
-                        }
-                        if ui.button("Unregister virtual camera").clicked() {
-                            match virtual_camera::call_registration(false) { Ok(()) => self.virtual_webcam=false, Err(e) => self.error=Some(format!("{e:#}")) }
-                        }
-                    });
-                }
-                ui.small("Tracking is currently detector-based; the next AR engine will use landmarks, head pose and real 3D assets.");
+                    ui.label(format!("Status: {}", self.ar_status));
+                    ui.small("Realtime MediaPipe landmarks provide the low-latency tracking layer. NextFace reconstruction is separate because its optimization is much slower.");
                 });
                 ui.separator();
                 #[cfg(windows)]
@@ -439,6 +413,7 @@ impl eframe::App for CameraApp {
                         ui.text_edit_singleline(&mut self.nextface_python);
                     });
                     if ui.button("Reconstruct current frame").clicked() {
+                        self.nextface_mesh = None;
                         if let Some(pair) = &self.pair {
                             let root = PathBuf::from(self.nextface_root.trim());
                             let python = self.nextface_python.trim().to_owned();
@@ -508,7 +483,8 @@ impl eframe::App for CameraApp {
                 ui.collapsing("Face Mesh", |ui| {
                     ui.label("Realtime MediaPipe face mesh / landmarks");
                     ui.label(format!("{} tracked face(s), {} landmarks", self.face_tracks.len(), self.face_tracks.iter().map(|f| f.landmarks.len()).sum::<usize>()));
-                    ui.small("NextFace can reconstruct a higher-fidelity 3D face from the current RGB frame; use the NextFace panel for reconstruction.");
+                    ui.small("MediaPipe: realtime landmarks. NextFace: high-fidelity reconstructed geometry.");
+                    if let Some(mesh) = &self.nextface_mesh { ui.label(format!("NextFace mesh: {} vertices · {} triangles", mesh.vertices.len(), mesh.faces.len())); } else { ui.label("NextFace mesh: not loaded"); }
                 });
 
                 ui.collapsing("AI detail", |ui| {
@@ -566,7 +542,7 @@ impl eframe::App for CameraApp {
                             for &(lx, ly, _lz) in &track.landmarks {
                                 painter.circle_filled(rect.min + egui::vec2(lx * enhanced.size_vec2().x * sx, ly * enhanced.size_vec2().y * sy), 1.5, egui::Color32::LIGHT_GREEN);
                             }
-                            draw_ar_object(&painter, r, self.ar_object, self.ar_scale);
+                            if let Some(mesh) = &self.nextface_mesh { draw_face_mesh_wireframe(&painter, r, mesh); }
                         }
                     }
                 }
@@ -636,7 +612,6 @@ fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<FaceTrack>, String)>) 
                 FaceTrack {
                     bbox: (min_x * small.width() as f32 * sx, min_y * small.height() as f32 * sy,
                            (max_x-min_x) * small.width() as f32 * sx, (max_y-min_y) * small.height() as f32 * sy),
-                    confidence: 1.0,
                     landmarks: points,
                 }
             }).collect())
@@ -673,99 +648,77 @@ fn model_path() -> PathBuf {
     let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     p.pop(); p.push("models"); p.push("blaze_face_short_range.tflite"); p
 }
-fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: f32) {
-    if object == 0 { return; }
-
-    // The detector currently supplies a face box, so these effects use a stable
-    // face-local coordinate system and a perspective projection rather than
-    // unrelated screen-space doodles.
-    let cx = r.center().x;
-    let cy = r.top() + r.height() * 0.45;
-    let w = r.width() * scale.clamp(0.5, 1.8);
-    let h = r.height() * scale.clamp(0.5, 1.8);
-    let stroke = egui::Stroke::new((w * 0.012).clamp(1.5, 4.0), egui::Color32::WHITE);
-
-    match object {
-        1 => {
-            let lens_w = w * 0.27;
-            let lens_h = h * 0.13;
-            let gap = w * 0.045;
-            let left = egui::Rect::from_center_size(
-                egui::pos2(cx - lens_w - gap, cy),
-                egui::vec2(lens_w, lens_h),
-            );
-            let right = egui::Rect::from_center_size(
-                egui::pos2(cx + lens_w + gap, cy),
-                egui::vec2(lens_w, lens_h),
-            );
-            painter.rect_stroke(left, lens_h * 0.18, stroke, egui::StrokeKind::Outside);
-            painter.rect_stroke(right, lens_h * 0.18, stroke, egui::StrokeKind::Outside);
-            painter.line_segment(
-                [egui::pos2(left.right(), cy), egui::pos2(right.left(), cy)],
-                stroke,
-            );
-            painter.line_segment(
-                [left.left_top(), left.left_top() + egui::vec2(-w * 0.10, -h * 0.03)],
-                stroke,
-            );
-            painter.line_segment(
-                [right.right_top(), right.right_top() + egui::vec2(w * 0.10, -h * 0.03)],
-                stroke,
-            );
-        }
-        2 => {
-            // Crown: a shallow 3D prism with front and offset back faces.
-            let base = cy - h * 0.38;
-            let depth = egui::vec2(w * 0.045, -h * 0.07);
-            let front = [
-                egui::pos2(cx - w * 0.40, base),
-                egui::pos2(cx - w * 0.25, base - h * 0.24),
-                egui::pos2(cx - w * 0.08, base),
-                egui::pos2(cx + w * 0.08, base - h * 0.31),
-                egui::pos2(cx + w * 0.25, base),
-                egui::pos2(cx + w * 0.40, base - h * 0.20),
-                egui::pos2(cx + w * 0.44, base),
-            ];
-            let back = front.map(|p| p + depth);
-            for pair in front.windows(2) { painter.line_segment([pair[0], pair[1]], stroke); }
-            for pair in back.windows(2) { painter.line_segment([pair[0], pair[1]], stroke); }
-            for i in [0usize, 2, 4, 6] { painter.line_segment([front[i], back[i]], stroke); }
-            painter.line_segment([front[0], front[6]], stroke);
-            painter.line_segment([back[0], back[6]], stroke);
-        }
-        3 => {
-            // Cube: project a 3D cube with a consistent depth vector.
-            let half = w.min(h) * 0.18;
-            let depth = egui::vec2(half * 0.42, -half * 0.42);
-            let center = egui::pos2(cx, cy - h * 0.02);
-            let front = [
-                center + egui::vec2(-half, -half),
-                center + egui::vec2( half, -half),
-                center + egui::vec2( half,  half),
-                center + egui::vec2(-half,  half),
-            ];
-            let back = front.map(|p| p + depth);
-            for i in 0..4 {
-                painter.line_segment([front[i], front[(i + 1) % 4]], stroke);
-                painter.line_segment([back[i], back[(i + 1) % 4]], stroke);
-                painter.line_segment([front[i], back[i]], stroke);
+fn find_nextface_mesh(dir: &std::path::Path) -> Option<PathBuf> {
+    let mut found = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("obj") {
+                if p.file_name().and_then(|s| s.to_str()).map(|s| s.starts_with("mesh")).unwrap_or(false) {
+                    found = Some(p);
+                    break;
+                }
             }
         }
-        _ => {}
+    }
+    found
+}
+
+fn load_obj_mesh(path: &std::path::Path) -> Result<FaceMesh> {
+    let text = std::fs::read_to_string(path)?;
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        match it.next() {
+            Some("v") => {
+                let x: f32 = it.next().unwrap_or("0").parse()?;
+                let y: f32 = it.next().unwrap_or("0").parse()?;
+                let z: f32 = it.next().unwrap_or("0").parse()?;
+                vertices.push([x,y,z]);
+            }
+            Some("f") => {
+                let mut idx = [0usize; 3];
+                let mut ok = true;
+                for i in 0..3 {
+                    let token = it.next().unwrap_or("");
+                    let raw = token.split('/').next().unwrap_or("");
+                    let n: usize = match raw.parse() { Ok(v) if v > 0 => v - 1, _ => { ok=false; break; } };
+                    idx[i]=n;
+                }
+                if ok && idx.iter().all(|&i| i < vertices.len()) { faces.push(idx); }
+            }
+            _ => {}
+        }
+    }
+    if vertices.is_empty() || faces.is_empty() { anyhow::bail!("OBJ contains no triangle mesh"); }
+    Ok(FaceMesh { vertices, faces })
+}
+
+fn draw_face_mesh_wireframe(painter: &egui::Painter, rect: egui::Rect, mesh: &FaceMesh) {
+    if mesh.vertices.is_empty() { return; }
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for v in &mesh.vertices { for k in 0..3 { min[k]=min[k].min(v[k]); max[k]=max[k].max(v[k]); } }
+    let center = [(min[0]+max[0])*0.5,(min[1]+max[1])*0.5,(min[2]+max[2])*0.5];
+    let scale = 0.88 / (max[0]-min[0]).max(max[1]-min[1]).max(1e-4);
+    let mut projected = Vec::with_capacity(mesh.vertices.len());
+    for v in &mesh.vertices {
+        let x=(v[0]-center[0])*scale;
+        let y=(v[1]-center[1])*scale;
+        let z=(v[2]-center[2])*scale;
+        // Simple perspective projection of the actual reconstructed 3D vertices.
+        let depth=1.0/(1.0+(z*0.35));
+        projected.push(egui::pos2(rect.center().x+x*rect.width()*0.5*depth, rect.center().y-y*rect.height()*0.5*depth));
+    }
+    let stroke=egui::Stroke::new(0.7, egui::Color32::LIGHT_GREEN);
+    for f in &mesh.faces {
+        painter.line_segment([projected[f[0]],projected[f[1]]],stroke);
+        painter.line_segment([projected[f[1]],projected[f[2]]],stroke);
+        painter.line_segment([projected[f[2]],projected[f[0]]],stroke);
     }
 }
 
-fn draw_ar_object_image(img: &mut RgbImage, x:f32,y:f32,w:f32,h:f32,object:usize,scale:f32) {
-    fn px(img:&mut RgbImage,x:i32,y:i32){ if x>=0 && y>=0 && (x as u32)<img.width() && (y as u32)<img.height(){ img.put_pixel(x as u32,y as u32,image::Rgb([255,255,255])); } }
-    fn line(img:&mut RgbImage,mut x0:i32,mut y0:i32,x1:i32,y1:i32){ let dx=(x1-x0).abs(); let sx=if x0<x1{1}else{-1}; let dy=-(y1-y0).abs(); let sy=if y0<y1{1}else{-1}; let mut e=dx+dy; loop{ px(img,x0,y0); if x0==x1&&y0==y1{break;} let e2=2*e; if e2>=dy{e+=dy;x0+=sx;} if e2<=dx{e+=dx;y0+=sy;} } }
-    let cx=x+w*0.5; let cy=y+h*0.45; let s=scale.clamp(0.5,1.8); let ww=w*s; let hh=h*s;
-    match object {
-      1 => { let lw=ww*0.27; let lh=hh*0.13; let gap=ww*0.045; let l=(cx-lw-gap,cy); let r=(cx+lw+gap,cy); for &(a,b,c,d) in &[(l.0-lw,l.1-lh,l.0,l.1-lh),(l.0,l.1-lh,l.0,l.1+lh),(l.0,l.1+lh,l.0-lw,l.1+lh),(r.0,r.1-lh,r.0+lw,r.1-lh),(r.0+lw,r.1-lh,r.0+lw,r.1+lh),(r.0+lw,r.1+lh,r.0,r.1+lh)] { line(img,a as i32,b as i32,c as i32,d as i32); } line(img,l.0 as i32,cy as i32,r.0 as i32,cy as i32); }
-      2 => { let base=cy-hh*0.38; let p=[(cx-ww*0.40,base),(cx-ww*0.25,base-hh*0.24),(cx-ww*0.08,base),(cx+ww*0.08,base-hh*0.31),(cx+ww*0.25,base),(cx+ww*0.40,base-hh*0.20),(cx+ww*0.44,base)]; let d=(ww*0.045,-hh*0.07); for q in p.windows(2){line(img,q[0].0 as i32,q[0].1 as i32,q[1].0 as i32,q[1].1 as i32); line(img,(q[0].0+d.0) as i32,(q[0].1+d.1) as i32,(q[1].0+d.0) as i32,(q[1].1+d.1) as i32);} for &i in &[0usize,2,4,6]{line(img,p[i].0 as i32,p[i].1 as i32,(p[i].0+d.0) as i32,(p[i].1+d.1) as i32);} }
-      3 => { let q=ww.min(hh)*0.18; let d=(q*0.42,-q*0.42); let p=[(cx-q,cy-q),(cx+q,cy-q),(cx+q,cy+q),(cx-q,cy+q)]; for i in 0..4{let a=p[i];let b=p[(i+1)%4];line(img,a.0 as i32,a.1 as i32,b.0 as i32,b.1 as i32);line(img,(a.0+d.0) as i32,(a.1+d.1) as i32,(b.0+d.0) as i32,(b.1+d.1) as i32);line(img,a.0 as i32,a.1 as i32,(a.0+d.0) as i32,(a.1+d.1) as i32);} }
-      _ => {}
-    }
-}
 fn auto_tune(src: &RgbImage) -> Tuning {
     let mut sum = 0.0f64;
     let mut r_sum = 0.0f64;
