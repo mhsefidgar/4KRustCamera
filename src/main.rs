@@ -68,6 +68,7 @@ struct CameraApp {
     nextface_root: String,
     nextface_python: String,
     nextface_status: String,
+    nextface_tx: Sender<String>,
     nextface_rx: Receiver<String>,
 }
 
@@ -76,7 +77,7 @@ impl CameraApp {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
         let (worker_tx, ar_rx) = bounded::<(Vec<FaceTrack>, String)>(2);
         ar::spawn_worker(worker_rx, worker_tx);
-        let (_nextface_tx, nextface_rx) = bounded::<String>(2);
+        let (nextface_tx, nextface_rx) = bounded::<String>(2);
         Self {
             rx,
             camera_tx,
@@ -111,6 +112,7 @@ impl CameraApp {
             nextface_root: "NextFace".to_owned(),
             nextface_python: if cfg!(windows) { "python".to_owned() } else { "python3".to_owned() },
             nextface_status: "NextFace idle".to_owned(),
+            nextface_tx,
             nextface_rx,
         }
     }
@@ -391,7 +393,7 @@ impl eframe::App for CameraApp {
                             match pair.raw.save(&input) {
                                 Ok(()) => {
                                     self.nextface_status = format!("Starting NextFace… output: {}", output.display());
-                                    let tx = _nextface_tx.clone();
+                                    let tx = self.nextface_tx.clone();
                                     thread::spawn(move || {
                                         let optimizer = root.join("optimizer.py");
                                         if !optimizer.exists() {
