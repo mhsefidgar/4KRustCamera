@@ -124,6 +124,26 @@ impl Drop for VirtualCameraPublisher {
     }
 }
 
+pub fn check_registration_support() -> Result<()> {
+    let mut path = std::env::current_exe().context("current executable path")?;
+    path.set_file_name("4KRustCameraVirtualCamera.dll");
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe {
+        let module = LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH);
+        if module.is_null() {
+            anyhow::bail!("LoadLibraryExW failed: {} (DLL path: {})", GetLastError(), path.display());
+        }
+        let proc = GetProcAddress(module, b"Check4KRustCameraSupport\0".as_ptr());
+        if proc.is_none() { FreeLibrary(module); anyhow::bail!("virtual-camera support probe export is missing"); }
+        type Fn = unsafe extern "system" fn() -> i32;
+        let f: Fn = std::mem::transmute(proc);
+        let hr = f();
+        FreeLibrary(module);
+        if hr < 0 { anyhow::bail!("virtual-camera API unsupported/unavailable: HRESULT 0x{:08X}", hr as u32); }
+    }
+    Ok(())
+}
+
 pub fn call_registration(register: bool) -> Result<()> {
     let mut path = std::env::current_exe().context("current executable path")?;
     path.set_file_name("4KRustCameraVirtualCamera.dll");
