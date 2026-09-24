@@ -4,10 +4,10 @@ use rayon::prelude::*;
 use std::{mem::size_of, ptr, slice};
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, FreeLibrary, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
+    Foundation::{CloseHandle, FreeLibrary, GetLastError, LocalFree, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
     System::{
         LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH},
-        Memory::{CreateFileMappingW, LocalFree, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
+        Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS, FILE_MAP_ALL_ACCESS, PAGE_READWRITE},
         Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
     },
@@ -135,7 +135,7 @@ pub fn call_registration(register: bool) -> Result<()> {
             let code = GetLastError();
             anyhow::bail!("LoadLibraryExW failed: {} (DLL path: {})", code, path.display());
         }
-        let name: &[u8] = if register { b"Register4KRustCamera\0" } else { b"Unregister4KRustCamera\0" };
+        let name: &[u8] = if register { b"Register4KRustCamera\\0" } else { b"Unregister4KRustCamera\\0" };
         let proc = GetProcAddress(module, name.as_ptr());
         if proc.is_none() { FreeLibrary(module); anyhow::bail!("virtual-camera registration export is missing"); }
         type Fn = unsafe extern "system" fn() -> i32;
