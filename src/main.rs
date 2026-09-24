@@ -115,7 +115,7 @@ impl CameraApp {
             virtual_camera_publisher: virtual_camera::VirtualCameraPublisher::open().ok(),
             ar_tx,
             ar_rx,
-            nextface_root: "NextFace".to_owned(),
+            nextface_root: Self::detect_nextface_root(),
             nextface_python: if cfg!(windows) { "python".to_owned() } else { "python3".to_owned() },
             nextface_status: "NextFace idle".to_owned(),
             nextface_tx,
@@ -130,6 +130,25 @@ impl CameraApp {
             selected_face_sample: 0,
             face_sample_status: "Samples are downloaded on demand.".to_owned(),
         }
+    }
+
+    fn detect_nextface_root() -> String {
+        let mut candidates = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join("NextFace"));
+            candidates.push(cwd.join("nextface"));
+            candidates.push(cwd.join("..").join("NextFace"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join("NextFace"));
+                candidates.push(dir.join("nextface"));
+            }
+        }
+        candidates.into_iter()
+            .find(|p| p.join("optimizer.py").is_file())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "NextFace".to_owned())
     }
 
     fn refresh_textures(&mut self, ctx: &egui::Context) {
@@ -391,7 +410,7 @@ impl eframe::App for CameraApp {
 
                 ui.separator();
                 ui.collapsing("NextFace · high-fidelity 3D reconstruction", |ui| {
-                    ui.small("Runs NextFace on a captured RGB frame to reconstruct a textured 3D face mesh. This is an offline reconstruction backend, not a per-frame realtime effect.");
+                    ui.small("NextFace reconstructs a real textured 3D face from an image. Install/clone the upstream NextFace repository, then select its folder here.");
                     ui.horizontal(|ui| {
                         ui.label("NextFace");
                         ui.text_edit_singleline(&mut self.nextface_root);
@@ -400,6 +419,16 @@ impl eframe::App for CameraApp {
                         ui.label("Python");
                         ui.text_edit_singleline(&mut self.nextface_python);
                     });
+                    if ui.button("Use selected sample").clicked() {
+                        if let Some((name, _)) = self.face_samples.get(self.selected_face_sample) {
+                            let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("assets").join("face-samples").join(format!("{}.jpg", name.to_lowercase().replace(" ", "-").replace("—", "-").replace(|c: char| !c.is_ascii_alphanumeric() && c != "-", "")));
+                            if path.is_file() {
+                                self.nextface_status = format!("Selected sample: {}", path.display());
+                            } else {
+                                self.nextface_status = "Download the selected sample first.".to_owned();
+                            }
+                        }
+                    }
                     if ui.button("Reconstruct current frame").clicked() {
                         self.nextface_mesh = None;
                         if let Some(pair) = &self.pair {
@@ -486,7 +515,7 @@ impl eframe::App for CameraApp {
                         }
                     }
                     ui.label(format!("Status: {}", self.face_sample_status));
-                    ui.small("The samples are public-domain historical portraits from Wikimedia Commons and are intended only as reconstruction test inputs.");
+                    ui.small("Samples are downloaded from Wikimedia Commons and are used as reconstruction test inputs.");
                 });
 
                 ui.separator();
