@@ -141,7 +141,19 @@ pub fn call_registration(register: bool) -> Result<()> {
         let f: Fn = std::mem::transmute(proc);
         let hr = f();
         FreeLibrary(module);
-        if hr < 0 { anyhow::bail!("virtual-camera registration failed: HRESULT 0x{:08X}", hr as u32); }
+        if hr < 0 {
+            let code = hr as u32;
+            let detail = match code {
+                0x80004001 => "E_NOTIMPL: Windows virtual-camera API is not available/supported on this Windows build (MFCreateVirtualCamera requires Windows 11 build 22000+).",
+                0x80070005 => "E_ACCESSDENIED: Windows camera privacy/access policy denied virtual-camera registration.",
+                _ => "",
+            };
+            if detail.is_empty() {
+                anyhow::bail!("virtual-camera registration failed: HRESULT 0x{:08X}", code);
+            } else {
+                anyhow::bail!("virtual-camera registration failed: HRESULT 0x{:08X} — {}", code, detail);
+            }
+        }
     }
     Ok(())
 }
