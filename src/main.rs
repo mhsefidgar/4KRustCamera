@@ -58,6 +58,10 @@ struct FaceTrack {
     landmarks: Vec<(f32, f32, f32)>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct HeadPose { yaw: f32, pitch: f32, roll: f32, scale: f32 }
+
+
 enum CameraEvent {
     Cameras(Vec<(CameraIndex, String)>),
     Frame(RgbImage, f32),
@@ -93,6 +97,7 @@ struct CameraApp {
     last_auto_tune: Instant,
     face_tracks: Vec<FaceTrack>,
     nextface_mesh: Option<FaceMesh>,
+    mesh_pose: Option<HeadPose>,
     ar_status: String,
     #[cfg(windows)]
     virtual_camera_publisher: Option<virtual_camera::VirtualCameraPublisher>,
@@ -135,6 +140,7 @@ impl CameraApp {
             last_auto_tune: Instant::now(),
             face_tracks: Vec::new(),
             nextface_mesh: None,
+            mesh_pose: None,
             ar_status: "AR off".to_owned(),
             #[cfg(windows)]
             virtual_camera_publisher: virtual_camera::VirtualCameraPublisher::open().ok(),
@@ -542,7 +548,7 @@ impl eframe::App for CameraApp {
                             for &(lx, ly, _lz) in &track.landmarks {
                                 painter.circle_filled(rect.min + egui::vec2(lx * enhanced.size_vec2().x * sx, ly * enhanced.size_vec2().y * sy), 1.5, egui::Color32::LIGHT_GREEN);
                             }
-                            if let Some(mesh) = &self.nextface_mesh { draw_face_mesh_wireframe(&painter, r, mesh); }
+                            if let Some(mesh) = &self.nextface_mesh { if let Some(track) = self.face_tracks.first() { self.mesh_pose = Some(estimate_head_pose(track)); } draw_face_mesh_wireframe(&painter, r, mesh, self.mesh_pose.unwrap_or_default()); }
                         }
                     }
                 }
@@ -695,7 +701,20 @@ fn load_obj_mesh(path: &std::path::Path) -> Result<FaceMesh> {
     Ok(FaceMesh { vertices, faces })
 }
 
-fn draw_face_mesh_wireframe(painter: &egui::Painter, rect: egui::Rect, mesh: &FaceMesh) {
+fn estimate_head_pose(track: &FaceTrack) -> HeadPose {
+    if track.landmarks.len() < 10 { return HeadPose::default(); }
+    let p = |i: usize| track.landmarks.get(i).copied().unwrap_or((0.5,0.5,0.0));
+    // MediaPipe normalized landmarks: eyes and mouth provide a stable screen-space head orientation.
+    let l=p(33); let r=p(263); let nose=p(1); let mouth=p(13);
+    let yaw=((nose.0-0.5)*2.0).clamp(-1.0,1.0);
+    let roll=(r.1-l.1).atan2(r.0-l.0);
+    let eye_y=(l.1+r.1)*0.5;
+    let pitch=((mouth.1-nose.1)-(eye_y-nose.1)).clamp(-0.8,0.8);
+    let scale=(track.bbox.2.max(1e-3)).sqrt();
+    HeadPose { yaw: yaw*0.9, pitch:pitch*0.8, roll:-roll, scale }
+}
+
+fn draw_face_mesh_wireframe(painter: &egui::Painter, rect: egui::Rect, mesh: &FaceMesh, pose: HeadPose) {
     if mesh.vertices.is_empty() { return; }
     let mut min = [f32::MAX; 3];
     let mut max = [f32::MIN; 3];
@@ -704,9 +723,13 @@ fn draw_face_mesh_wireframe(painter: &egui::Painter, rect: egui::Rect, mesh: &Fa
     let scale = 0.88 / (max[0]-min[0]).max(max[1]-min[1]).max(1e-4);
     let mut projected = Vec::with_capacity(mesh.vertices.len());
     for v in &mesh.vertices {
-        let x=(v[0]-center[0])*scale;
-        let y=(v[1]-center[1])*scale;
-        let z=(v[2]-center[2])*scale;
+        let mut x=(v[0]-center[0])*scale;
+        let mut y=(v[1]-center[1])*scale;
+        let mut z=(v[2]-center[2])*scale;
+        let (sy,cy)=pose.yaw.sin_cos(); let (sp,cp)=pose.pitch.sin_cos(); let (sr,cr)=pose.roll.sin_cos();
+        let x1=cy*x+sy*z; let z1=-sy*x+cy*z;
+        let y1=cp*y-sp*z1; let z2=sp*y+cp*z1;
+        x=cr*x1-sr*y1; y=sr*x1+cr*y1; z=z2;
         // Simple perspective projection of the actual reconstructed 3D vertices.
         let depth=1.0/(1.0+(z*0.35));
         projected.push(egui::pos2(rect.center().x+x*rect.width()*0.5*depth, rect.center().y-y*rect.height()*0.5*depth));
