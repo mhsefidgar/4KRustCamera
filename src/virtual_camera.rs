@@ -134,7 +134,7 @@ pub fn call_registration(register: bool) -> Result<()> {
             let code = GetLastError();
             anyhow::bail!("LoadLibraryExW failed: {} (DLL path: {})", code, path.display());
         }
-        let name: &[u8] = if register { b"Register4KRustCamera\\0" } else { b"Unregister4KRustCamera\\0" };
+        let name: &[u8] = if register { b"Register4KRustCamera\0" } else { b"Unregister4KRustCamera\0" };
         let proc = GetProcAddress(module, name.as_ptr());
         if proc.is_none() { FreeLibrary(module); anyhow::bail!("virtual-camera registration export is missing"); }
         type Fn = unsafe extern "system" fn() -> i32;
