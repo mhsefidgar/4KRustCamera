@@ -244,7 +244,13 @@ extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllUnregisterServer() {
     return rc==ERROR_FILE_NOT_FOUND?S_OK:HRESULT_FROM_WIN32(rc);
 }
 
-static void DebugHr(const wchar_t* stage, HRESULT hr) {\n    wchar_t msg[256]{};\n    StringCchPrintfW(msg, 256, L"[4KRustCamera] %ls: HRESULT 0x%08X\\n", stage, static_cast<unsigned>(hr));\n    OutputDebugStringW(msg);\n}\n\nstatic HRESULT RegisterVirtualCameraInternal(bool remove) {
+static void DebugHr(const wchar_t* stage, HRESULT hr) {
+    wchar_t msg[256]{};
+    StringCchPrintfW(msg, 256, L"[4KRustCamera] %ls: HRESULT 0x%08X\n", stage, static_cast<unsigned>(hr));
+    OutputDebugStringW(msg);
+}
+
+static HRESULT RegisterVirtualCameraInternal(bool remove) {
     HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) return hr;
 
