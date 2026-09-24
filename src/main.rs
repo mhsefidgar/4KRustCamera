@@ -7,36 +7,15 @@ use nokhwa::{
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
     Camera,
 };
-use rayon::prelude::*;
 use std::{path::PathBuf, thread, time::{Duration, Instant}};
-use mediapipe::{FaceDetector, Image as MpImage, ModelSource, IouThreshold};
 
-#[derive(Clone, Debug)]
-struct Tuning {
-    exposure: f32,
-    contrast: f32,
-    saturation: f32,
-    sharpness: f32,
-    denoise: f32,
-    warmth: f32,
-    highlight_recovery: f32,
-    shadow_lift: f32,
-}
-
-impl Default for Tuning {
-    fn default() -> Self {
-        Self {
-            exposure: 0.0,
-            contrast: 1.08,
-            saturation: 1.06,
-            sharpness: 0.45,
-            denoise: 0.15,
-            warmth: 0.0,
-            highlight_recovery: 0.25,
-            shadow_lift: 0.08,
-        }
-    }
-}
+mod ar;
+mod image_pipeline;
+mod nextface;
+use ar::FaceTrack;
+use image_pipeline::{auto_tune, enhance, Tuning};
+use nextface::{FaceMesh, HeadPose};
+#[cfg(windows)] mod virtual_camera;
 
 struct FramePair {
     raw: RgbImage,
@@ -70,25 +49,43 @@ struct CameraApp {
     fps: f32,
     error: Option<String>,
     frames: u64,
-    dropped_estimate: u64,
     show_stats: bool,
     ar_enabled: bool,
     virtual_webcam: bool,
+    #[cfg(windows)]
+    virtual_camera_status: String,
     last_process_ms: f32,
-    face_boxes: Vec<(f32, f32, f32, f32, f32)>,
-    face_landmarks: Vec<Vec<[f32; 3]>>,
-    ar_object: usize,
-    ar_scale: f32,
+    auto_tune_enabled: bool,
+    auto_tune_default_enabled: bool,
+    auto_tune_interval_minutes: u32,
+    last_auto_tune: Instant,
+    face_tracks: Vec<FaceTrack>,
+    nextface_mesh: Option<FaceMesh>,
+    mesh_pose: Option<HeadPose>,
     ar_status: String,
+    #[cfg(windows)]
+    virtual_camera_publisher: Option<virtual_camera::VirtualCameraPublisher>,
     ar_tx: Sender<RgbImage>,
-    ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, String)>,
+    ar_rx: Receiver<(Vec<FaceTrack>, String)>,
+    nextface_root: String,
+    nextface_python: String,
+    nextface_status: String,
+    nextface_tx: Sender<String>,
+    nextface_rx: Receiver<String>,
+    face_sample_tx: Sender<String>,
+    face_sample_rx: Receiver<String>,
+    face_samples: Vec<(String, String)>,
+    selected_face_sample: usize,
+    face_sample_status: String,
 }
 
 impl CameraApp {
     fn new(rx: Receiver<CameraEvent>, camera_tx: Sender<CameraCommand>) -> Self {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
-        let (worker_tx, ar_rx) = bounded::<(Vec<(f32, f32, f32, f32, f32)>, String)>(2);
-        thread::spawn(move || face_ai_worker(worker_rx, worker_tx));
+        let (worker_tx, ar_rx) = bounded::<(Vec<FaceTrack>, String)>(2);
+        ar::spawn_worker(worker_rx, worker_tx);
+        let (nextface_tx, nextface_rx) = bounded::<String>(2);
+        let (face_sample_tx, face_sample_rx) = bounded::<String>(2);
         Self {
             rx,
             camera_tx,
@@ -104,19 +101,61 @@ impl CameraApp {
             fps: 0.0,
             error: None,
             frames: 0,
-            dropped_estimate: 0,
             show_stats: true,
             ar_enabled: false,
             virtual_webcam: false,
+            #[cfg(windows)]
+            virtual_camera_status: match virtual_camera::check_registration_support() {
+                Ok(()) => "Virtual camera API available".to_owned(),
+                Err(e) => format!("Virtual camera unavailable: {e:#}"),
+            },
             last_process_ms: 0.0,
-            face_boxes: Vec::new(),
-            face_landmarks: Vec::new(),
-            ar_object: 0,
-            ar_scale: 1.0,
+            auto_tune_enabled: false,
+            auto_tune_default_enabled: false,
+            auto_tune_interval_minutes: 2,
+            last_auto_tune: Instant::now(),
+            face_tracks: Vec::new(),
+            nextface_mesh: None,
+            mesh_pose: None,
             ar_status: "AR off".to_owned(),
+            #[cfg(windows)]
+            virtual_camera_publisher: virtual_camera::VirtualCameraPublisher::open().ok(),
             ar_tx,
             ar_rx,
+            nextface_root: Self::detect_nextface_root(),
+            nextface_python: if cfg!(windows) { "python".to_owned() } else { "python3".to_owned() },
+            nextface_status: "NextFace idle".to_owned(),
+            nextface_tx,
+            nextface_rx,
+            face_sample_tx,
+            face_sample_rx,
+            face_samples: vec![
+                ("Historic portrait — man".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/Portrait_of_a_man,_facing_front,_image_framed_by_gold_and_red_decorative_motif_LCCN2016653262.jpg".to_owned()),
+                ("Historic portrait — woman".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/African_American_woman,_head-and-shoulders_portrait,_facing_front_LCCN99472177.jpg".to_owned()),
+                ("Historic portrait — front view".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/Portrait_of_an_unidentified_man,_full-length,_standing,_facing_front_LCCN2015652128.jpg".to_owned()),
+            ],
+            selected_face_sample: 0,
+            face_sample_status: "Samples are downloaded on demand.".to_owned(),
         }
+    }
+
+    fn detect_nextface_root() -> String {
+        let mut candidates = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join("NextFace"));
+            candidates.push(cwd.join("nextface"));
+            candidates.push(cwd.join("..").join("NextFace"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join("NextFace"));
+                candidates.push(dir.join("nextface"));
+            }
+        }
+        candidates.into_iter()
+            .find(|p| p.join("optimizer.py").is_file())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "NextFace".to_owned())
     }
 
     fn refresh_textures(&mut self, ctx: &egui::Context) {
@@ -166,19 +205,40 @@ impl CameraApp {
             }
         }
 
-        while let Ok((boxes, status)) = self.ar_rx.try_recv() {
-            self.face_boxes = boxes;
+        while let Ok((tracks, status)) = self.ar_rx.try_recv() {
+            self.face_tracks = tracks;
             self.ar_status = status;
+        }
+        while let Ok(status) = self.nextface_rx.try_recv() {
+            self.nextface_status = status;
+        }
+        while let Ok(status) = self.face_sample_rx.try_recv() {
+            self.face_sample_status = status;
         }
 
         if let Some((raw, capture_ms)) = latest {
+            if self.auto_tune_enabled && self.last_auto_tune.elapsed() >= Duration::from_secs(self.auto_tune_interval_minutes.max(1) as u64 * 60) {
+                self.tuning = auto_tune(&raw);
+                self.last_auto_tune = Instant::now();
+            }
             let start = Instant::now();
-            let enhanced = enhance(&raw, &self.tuning);
+            let mut enhanced = enhance(&raw, &self.tuning);
+            if self.ar_enabled && !self.face_tracks.is_empty() {
+                draw_ar_overlay(&mut enhanced, &self.face_tracks);
+            }
+            #[cfg(windows)]
+            if self.virtual_webcam {
+                if let Some(publisher) = &mut self.virtual_camera_publisher {
+                    if let Err(e) = publisher.publish(&enhanced) { self.error = Some(format!("Virtual camera IPC: {e:#}")); }
+                } else {
+                    self.error = Some("Virtual camera is enabled but the frame publisher is unavailable.".to_owned());
+                }
+            }
             let process_ms = start.elapsed().as_secs_f32() * 1000.0;
             if self.ar_enabled {
                 let _ = self.ar_tx.try_send(raw.clone());
             } else {
-                self.face_boxes.clear();
+                self.face_tracks.clear();
                 self.ar_status = "AR off".to_owned();
             }
 
@@ -213,32 +273,54 @@ impl eframe::App for CameraApp {
             ui.horizontal(|ui| {
                 ui.heading("4K Rust Camera");
                 ui.separator();
-                ui.label(egui::RichText::new("LIVE").strong().color(egui::Color32::LIGHT_GREEN));
+                let live_text = if self.frozen { "PAUSED" } else { "LIVE" };
+                let live_color = if self.frozen { egui::Color32::YELLOW } else { egui::Color32::LIGHT_GREEN };
+                ui.label(egui::RichText::new(live_text).strong().color(live_color));
                 ui.separator();
                 ui.label(format!("{:.1} FPS", self.fps));
-
-                if let Some(p) = &self.pair {
-                    ui.label(format!(
-                        "capture {:.1} ms · enhance {:.1} ms",
-                        p.capture_ms, p.process_ms
-                    ));
-                }
-
                 ui.separator();
-                ui.checkbox(&mut self.compare, "A/B compare");
-                ui.checkbox(&mut self.frozen, "Freeze");
+                ui.label(format!("{} face{}", self.face_tracks.len(), if self.face_tracks.len() == 1 { "" } else { "s" }));
+                ui.separator();
+                ui.label(if self.ar_enabled { "AR ON" } else { "AR OFF" });
+                #[cfg(windows)]
+                {
+                    ui.separator();
+                    ui.label(if self.virtual_webcam { "VIRTUAL CAMERA ON" } else { "VIRTUAL CAMERA OFF" });
+                }
+                if let Some(p) = &self.pair {
+                    ui.separator();
+                    ui.small(format!("capture {:.1} ms · enhance {:.1} ms", p.capture_ms, p.process_ms));
+                }
+                ui.separator();
+                if ui.button(if self.compare { "Enhanced view" } else { "A/B compare" }).clicked() {
+                    self.compare = !self.compare;
+                }
+                if ui.button(if self.frozen { "Resume" } else { "Freeze" }).clicked() {
+                    self.frozen = !self.frozen;
+                }
                 ui.checkbox(&mut self.show_stats, "Stats");
             });
         });
 
         egui::SidePanel::left("controls")
             .resizable(true)
-            .default_width(285.0)
+            .default_width(315.0)
             .min_width(250.0)
             .show(ctx, |ui| {
                 ui.heading("Camera");
-                ui.small("Live enhancement pipeline");
+                ui.small("Capture → enhance → AR → virtual camera");
                 ui.separator();
+                ui.group(|ui| {
+                    ui.strong("Quick controls");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Auto Enhance").clicked() {
+                            if let Some(pair) = &self.pair { self.tuning = auto_tune(&pair.raw); }
+                        }
+                        if ui.button("Reset").clicked() { self.tuning = Tuning::default(); }
+                        if ui.button(if self.compare { "Enhanced" } else { "Compare" }).clicked() { self.compare = !self.compare; }
+                    });
+                });
+                ui.add_space(4.0);
                 ui.label("Camera");
                 if self.cameras.is_empty() {
                     ui.label("Detecting cameras…");
@@ -280,23 +362,15 @@ impl eframe::App for CameraApp {
                     ui.small(if self.compare { "A/B comparison" } else { "Enhanced only" });
                 });
                 ui.separator();
-                ui.heading("Image tuning");
+                ui.collapsing("Image tuning", |ui| {
                 ui.add(egui::Slider::new(&mut self.tuning.exposure, -1.0..=1.0).text("Exposure"));
                 ui.add(egui::Slider::new(&mut self.tuning.contrast, 0.7..=1.5).text("Contrast"));
-                ui.add(
-                    egui::Slider::new(&mut self.tuning.saturation, 0.5..=1.6).text("Saturation"),
-                );
+                ui.add(egui::Slider::new(&mut self.tuning.saturation, 0.5..=1.6).text("Saturation"));
                 ui.add(egui::Slider::new(&mut self.tuning.sharpness, 0.0..=1.0).text("Detail"));
                 ui.add(egui::Slider::new(&mut self.tuning.denoise, 0.0..=0.6).text("Denoise"));
                 ui.add(egui::Slider::new(&mut self.tuning.warmth, -0.5..=0.5).text("Warmth"));
-                ui.add(
-                    egui::Slider::new(&mut self.tuning.highlight_recovery, 0.0..=0.7)
-                        .text("Highlights"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.tuning.shadow_lift, 0.0..=0.5).text("Shadows"),
-                );
-
+                ui.add(egui::Slider::new(&mut self.tuning.highlight_recovery, 0.0..=0.7).text("Highlights"));
+                ui.add(egui::Slider::new(&mut self.tuning.shadow_lift, 0.0..=0.5).text("Shadows"));
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Auto Tune").clicked() {
                         if let Some(pair) = &self.pair { self.tuning = auto_tune(&pair.raw); }
@@ -306,35 +380,156 @@ impl eframe::App for CameraApp {
                         self.tuning = Tuning { contrast: 1.0, saturation: 1.0, sharpness: 0.0, denoise: 0.0, ..Tuning::default() };
                     }
                 });
-                ui.small("Auto Tune uses the current frame; run it again when lighting changes.");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.auto_tune_enabled, "Auto Tune every");
+                    ui.add_enabled(self.auto_tune_enabled, egui::DragValue::new(&mut self.auto_tune_interval_minutes).range(1..=60).suffix(" min"));
+                });
+                ui.checkbox(&mut self.auto_tune_default_enabled, "Use Auto Tune by default");
+                if self.auto_tune_enabled && self.last_auto_tune.elapsed() >= Duration::from_secs(self.auto_tune_interval_minutes.max(1) as u64 * 60) {
+                    self.last_auto_tune = Instant::now();
+                }
+                ui.small("Automatic tuning updates the image parameters from the newest frame at the selected interval. Default interval: 2 minutes.");
+                });
                 ui.separator();
-                ui.heading("AR & virtual camera");
-                if ui.checkbox(&mut self.ar_enabled, "Face AR overlay").changed() {
-                    if self.ar_enabled { self.ar_status = "Starting MediaPipe face detector…".to_owned(); }
-                    else { self.face_boxes.clear(); self.ar_status = "AR off".to_owned(); }
-                }
-                ui.label(format!("Status: {}", self.ar_status));
-                if self.ar_enabled {
-                    ui.horizontal(|ui| {
-                        ui.label("3D object");
-                        egui::ComboBox::from_id_salt("ar_object")
-                            .selected_text(match self.ar_object { 1 => "Glasses", 2 => "Crown", 3 => "Cube", _ => "None" })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.ar_object, 0, "None");
-                                ui.selectable_value(&mut self.ar_object, 1, "Glasses");
-                                ui.selectable_value(&mut self.ar_object, 2, "Crown");
-                                ui.selectable_value(&mut self.ar_object, 3, "Cube");
-                            });
-                    });
-                    if self.ar_object != 0 {
-                        ui.add(egui::Slider::new(&mut self.ar_scale, 0.5..=1.8).text("Object scale"));
+                ui.collapsing("Face AR", |ui| {
+                    if ui.checkbox(&mut self.ar_enabled, "Enable face tracking").changed() {
+                        if self.ar_enabled { self.ar_status = "Starting MediaPipe Face Landmarker…".to_owned(); }
+                        else { self.face_tracks.clear(); self.ar_status = "AR off".to_owned(); }
                     }
-                }
-                ui.small("MediaPipe BlazeFace runs on a reduced preview frame; the 4K enhancement path is not replaced.");
-                if ui.button("Register 4K Rust Virtual Camera").clicked() {
-                    self.error = Some("Virtual-camera registration still needs the Media Foundation custom media-source DLL. MFCreateVirtualCamera can register a source, but Windows will not invent the frame-producing COM component for this app.".to_owned());
-                }
-                ui.small("The control is active so the state is explicit. The remaining work is the Windows Media Foundation source component that supplies processed frames.");
+                    ui.label(format!("Status: {}", self.ar_status));
+                    ui.small("Realtime MediaPipe landmarks provide the low-latency tracking layer. NextFace reconstruction is separate because its optimization is much slower.");
+                });
+                ui.separator();
+                #[cfg(windows)]
+                ui.collapsing("Virtual camera", |ui| {
+                    ui.checkbox(&mut self.virtual_webcam, "Publish enhanced frames");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Register").clicked() {
+                            match virtual_camera::call_registration(true) {
+                                Ok(()) => { self.error = None; self.virtual_camera_status = "Registered".to_owned(); }
+                                Err(e) => { self.virtual_camera_status = format!("{e:#}"); self.error = Some(format!("{e:#}")); }
+                            }
+                        }
+                        if ui.button("Unregister").clicked() {
+                            match virtual_camera::call_registration(false) {
+                                Ok(()) => self.virtual_webcam = false,
+                                Err(e) => self.error = Some(format!("{e:#}")),
+                            }
+                        }
+                    });
+                    ui.label(format!("Status: {}", self.virtual_camera_status));
+                    ui.small("Frames published here are the same enhanced/AR-composited frames shown in the preview.");
+                });
+
+                ui.separator();
+                ui.collapsing("NextFace · high-fidelity 3D reconstruction", |ui| {
+                    ui.small("NextFace reconstructs a real textured 3D face from an image. Install/clone the upstream NextFace repository, then select its folder here.");
+                    ui.horizontal(|ui| {
+                        ui.label("NextFace");
+                        ui.text_edit_singleline(&mut self.nextface_root);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Python");
+                        ui.text_edit_singleline(&mut self.nextface_python);
+                    });
+                    if ui.button("Use selected sample").clicked() {
+                        if let Some((name, _)) = self.face_samples.get(self.selected_face_sample) {
+                            let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("assets").join("face-samples").join(format!("{}.jpg", name.to_lowercase().replace(" ", "-").replace("—", "-").replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "")));
+                            if path.is_file() {
+                                self.nextface_status = format!("Selected sample: {}", path.display());
+                            } else {
+                                self.nextface_status = "Download the selected sample first.".to_owned();
+                            }
+                        }
+                    }
+                    if ui.button("Reconstruct current frame").clicked() {
+                        self.nextface_mesh = None;
+                        if let Some(pair) = &self.pair {
+                            let root = PathBuf::from(self.nextface_root.trim());
+                            let python = self.nextface_python.trim().to_owned();
+                            let input = std::env::temp_dir().join("4k-rust-camera-nextface-input.png");
+                            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                            let output = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("nextface-output").join(format!("reconstruction-{stamp}"));
+                            match pair.raw.save(&input) {
+                                Ok(()) => {
+                                    self.nextface_status = format!("Starting NextFace… output: {}", output.display());
+                                    let tx = self.nextface_tx.clone();
+                                    thread::spawn(move || {
+                                        let optimizer = root.join("optimizer.py");
+                                        if !optimizer.exists() {
+                                            let _ = tx.send(format!("NextFace not found: {}", optimizer.display()));
+                                            return;
+                                        }
+                                        if let Err(e) = std::fs::create_dir_all(&output) {
+                                            let _ = tx.send(format!("NextFace output directory failed: {e}"));
+                                            return;
+                                        }
+                                        let result = std::process::Command::new(&python)
+                                            .arg(&optimizer)
+                                            .arg("--input").arg(&input)
+                                            .arg("--output").arg(&output)
+                                            .current_dir(&root)
+                                            .spawn()
+                                            .and_then(|mut child| child.wait());
+                                        match result {
+                                            Ok(status) if status.success() => {
+                                                let _ = tx.send(format!("NextFace complete · mesh/output: {}", output.display()));
+                                            }
+                                            Ok(status) => {
+                                                let _ = tx.send(format!("NextFace exited with {status}"));
+                                            }
+                                            Err(e) => {
+                                                let _ = tx.send(format!("Could not start NextFace: {e}"));
+                                            }
+                                        }
+                                    });
+                                }
+                                Err(e) => self.nextface_status = format!("Could not save frame: {e}"),
+                            }
+                        } else {
+                            self.nextface_status = "Capture a frame before running reconstruction.".to_owned();
+                        }
+                    }
+                    ui.label(format!("Status: {}", self.nextface_status));
+                    ui.small("NextFace requires its Python environment plus the Basel morphable/albedo model files described by the upstream project.");
+                });
+
+                ui.separator();
+                ui.collapsing("Face Samples · add to reconstruction", |ui| {
+                    ui.small("Download public-domain sample portraits for testing the face-reconstruction pipeline. These are source images, not live 2D stickers.");
+                    let mut requested = None;
+                    egui::ComboBox::from_id_salt("face_sample_selector")
+                        .selected_text(self.face_samples.get(self.selected_face_sample).map(|x| x.0.as_str()).unwrap_or("No sample"))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for (i, (name, _)) in self.face_samples.iter().enumerate() {
+                                if ui.selectable_label(i == self.selected_face_sample, name).clicked() { requested = Some(i); }
+                            }
+                        });
+                    if let Some(i) = requested { self.selected_face_sample = i; }
+                    if ui.button("Download selected sample").clicked() {
+                        if let Some((name, url)) = self.face_samples.get(self.selected_face_sample).cloned() {
+                            let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")) .join("assets").join("face-samples");
+                            let safe = name.to_lowercase().replace(' ', "-").replace('—', "-").replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "");
+                            let path = dir.join(format!("{safe}.jpg"));
+                            self.face_sample_status = format!("Downloading {name}…");
+                            let status_tx = self.face_sample_tx.clone();
+                            thread::spawn(move || {
+                                let result = (|| -> Result<()> {
+                                    std::fs::create_dir_all(&dir)?;
+                                    let mut response = ureq::get(&url).call().map_err(|e| anyhow::anyhow!("sample download failed: {e}"))?;
+                                    let bytes = response.body_mut().with_config().limit(12 * 1024 * 1024).read_to_vec().map_err(|e| anyhow::anyhow!("sample download failed: {e}"))?;
+                                    if bytes.len() < 10_000 { anyhow::bail!("downloaded sample is unexpectedly small"); }
+                                    std::fs::write(&path, bytes)?;
+                                    Ok(())
+                                })();
+                                let _ = status_tx.send(match result { Ok(()) => format!("Sample ready: {}", path.display()), Err(e) => format!("Sample download failed: {e}") });
+                            });
+                        }
+                    }
+                    ui.label(format!("Status: {}", self.face_sample_status));
+                    ui.small("Samples are downloaded from Wikimedia Commons and are used as reconstruction test inputs.");
+                });
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
@@ -352,6 +547,13 @@ impl eframe::App for CameraApp {
 
                 });
 
+                ui.collapsing("Face Mesh", |ui| {
+                    ui.label("Realtime MediaPipe face mesh / landmarks");
+                    ui.label(format!("{} tracked face(s), {} landmarks", self.face_tracks.len(), self.face_tracks.iter().map(|f| f.landmarks.len()).sum::<usize>()));
+                    ui.small("MediaPipe: realtime landmarks. NextFace: high-fidelity reconstructed geometry.");
+                    if let Some(mesh) = &self.nextface_mesh { ui.label(format!("NextFace mesh: {} vertices · {} triangles", mesh.vertices.len(), mesh.faces.len())); } else { ui.label("NextFace mesh: not loaded"); }
+                });
+
                 ui.collapsing("AI detail", |ui| {
                     ui.label("AI enhancement is intentionally disabled in the live 4K path until an ONNX/DirectML backend is benchmarked.");
                     ui.small("Planned: lightweight tiled inference with a latency guard, rather than forcing a heavy model over every 4K frame.");
@@ -365,6 +567,16 @@ impl eframe::App for CameraApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.strong(if self.compare { "Before / After" } else { "Live enhanced preview" });
+                ui.add_space(8.0);
+                ui.small(format!("{} × {}", self.pair.as_ref().map(|p| p.enhanced.width()).unwrap_or(0), self.pair.as_ref().map(|p| p.enhanced.height()).unwrap_or(0)));
+                if self.ar_enabled {
+                    ui.separator();
+                    ui.small(&self.ar_status);
+                }
+            });
             ui.add_space(4.0);
             if let (Some(raw), Some(enhanced)) = (&self.raw_texture, &self.enhanced_texture) {
                 if self.compare {
@@ -384,16 +596,20 @@ impl eframe::App for CameraApp {
                     let ratio = enhanced.size_vec2().y / enhanced.size_vec2().x;
                     let size = egui::vec2(avail.x.max(1.0), (avail.x * ratio).min(avail.y * 0.92));
                     let response = ui.image((enhanced.id(), size));
-                    if self.ar_enabled && !self.face_boxes.is_empty() {
+                    if self.ar_enabled && !self.face_tracks.is_empty() {
                         let rect = response.rect;
                         let sx = rect.width() / enhanced.size_vec2().x.max(1.0);
                         let sy = rect.height() / enhanced.size_vec2().y.max(1.0);
                         let painter = ui.painter_at(rect);
-                        for (x, y, w, h, score) in &self.face_boxes {
-                            let r = egui::Rect::from_min_size(rect.min + egui::vec2(*x * sx, *y * sy), egui::vec2(*w * sx, *h * sy));
-                            painter.rect_stroke(r, 8.0, egui::Stroke::new(2.0, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
-                            painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE {:.0}%", score * 100.0), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
-                            draw_ar_object(&painter, r, self.ar_object, self.ar_scale);
+                        for track in &self.face_tracks {
+                            let (x, y, w, h) = track.bbox;
+                            let r = egui::Rect::from_min_size(rect.min + egui::vec2(x * sx, y * sy), egui::vec2(w * sx, h * sy));
+                            painter.rect_stroke(r, 8.0, egui::Stroke::new(1.5_f32, egui::Color32::LIGHT_GREEN), egui::StrokeKind::Outside);
+                            painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, format!("FACE · {} landmarks", track.landmarks.len()), egui::TextStyle::Small.resolve(ui.style()), egui::Color32::WHITE);
+                            for &(lx, ly, _lz) in &track.landmarks {
+                                painter.circle_filled(rect.min + egui::vec2(lx * enhanced.size_vec2().x * sx, ly * enhanced.size_vec2().y * sy), 1.5, egui::Color32::LIGHT_GREEN);
+                            }
+                            if let Some(mesh) = &self.nextface_mesh { if let Some(track) = self.face_tracks.first() { self.mesh_pose = Some(nextface::estimate_head_pose(track)); } nextface::draw_wireframe(&painter, r, mesh, self.mesh_pose.unwrap_or_default()); }
                         }
                     }
                 }
@@ -413,230 +629,38 @@ impl eframe::App for CameraApp {
 }
 
 
-fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<(f32, f32, f32, f32, f32)>, String)>) {
-    let model = model_path();
-    if !model.exists() {
-        let _ = tx.send((Vec::new(), "AR: downloading lightweight face model…".to_owned()));
-        if let Err(e) = download_face_model(&model) {
-            let _ = tx.send((Vec::new(), format!("AR unavailable: {e}")));
-            return;
-        }
-    }
-    let mut detector = match FaceDetector::builder(ModelSource::path(&model))
-        .min_detection_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
-        .min_suppression_threshold(IouThreshold::new(0.3).expect("valid IoU threshold"))
-        .build()
-    {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = tx.send((Vec::new(), format!("AR model load failed: {e}")));
-            return;
-        }
-    };
-    let _ = tx.send((Vec::new(), "AR ready".to_owned()));
-    while let Ok(src) = rx.recv() {
-        let max_w = 640u32;
-        let small = if src.width() > max_w {
-            let h = ((src.height() as f32) * max_w as f32 / src.width() as f32) as u32;
-            image::imageops::resize(&src, max_w, h.max(1), image::imageops::FilterType::Triangle)
-        } else {
-            src.clone()
-        };
-        let temp = std::env::temp_dir().join("4k-rust-camera-ar.png");
-        if let Err(e) = small.save(&temp) {
-            let _ = tx.try_send((Vec::new(), format!("AR frame preparation failed: {e}")));
-            continue;
-        }
-        let result: Result<Vec<(f32, f32, f32, f32, f32)>> = (|| {
-            let image = MpImage::from_file(&temp)?;
-            let detections = detector.detect(&image)?;
-            let sx = src.width() as f32 / small.width().max(1) as f32;
-            let sy = src.height() as f32 / small.height().max(1) as f32;
-            Ok(detections.into_iter().map(|face| {
-                let bb = face.bounding_box;
-                let score = face.score().map(|v| v.get()).unwrap_or(0.0);
-                (
-                    bb.left() as f32 * sx,
-                    bb.top() as f32 * sy,
-                    bb.width() as f32 * sx,
-                    bb.height() as f32 * sy,
-                    score,
-                )
-            }).collect())
-        })();
-        let _ = std::fs::remove_file(&temp);
-        match result {
-            Ok(boxes) => {
-                let count = boxes.len();
-                let _ = tx.try_send((boxes, format!("AR active · {} face(s)", count)));
-            }
-            Err(e) => {
-                let _ = tx.try_send((Vec::new(), format!("AR inference failed: {e}")));
-            }
+fn draw_ar_overlay(image: &mut RgbImage, tracks: &[FaceTrack]) {
+    let color = image::Rgb([0, 255, 0]);
+    for track in tracks {
+        let (x, y, w, h) = track.bbox;
+        draw_line(image, x as i32, y as i32, (x + w) as i32, y as i32, color);
+        draw_line(image, x as i32, (y + h) as i32, (x + w) as i32, (y + h) as i32, color);
+        draw_line(image, x as i32, y as i32, x as i32, (y + h) as i32, color);
+        draw_line(image, (x + w) as i32, y as i32, (x + w) as i32, (y + h) as i32, color);
+        for &(lx, ly, _) in &track.landmarks {
+            let px = (lx * image.width() as f32) as i32;
+            let py = (ly * image.height() as f32) as i32;
+            for dx in -1..=1 { for dy in -1..=1 {
+                let xx = px + dx; let yy = py + dy;
+                if xx >= 0 && yy >= 0 && (xx as u32) < image.width() && (yy as u32) < image.height() {
+                    image.put_pixel(xx as u32, yy as u32, color);
+                }
+            }}
         }
     }
 }
 
-fn download_face_model(path: &PathBuf) -> Result<()> {
-    const URL: &str = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
-    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
-    let mut response = ureq::get(URL).call().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
-    let bytes = response.body_mut().with_config().limit(2 * 1024 * 1024).read_to_vec().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
-    if bytes.len() < 100_000 { anyhow::bail!("downloaded model is unexpectedly small"); }
-    let temp = path.with_extension("part");
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
-}
-
-fn model_path() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    p.pop(); p.push("models"); p.push("blaze_face_short_range.tflite"); p
-}
-fn draw_ar_object(painter: &egui::Painter, r: egui::Rect, object: usize, scale: f32) {
-    if object == 0 { return; }
-    let cx = r.center().x;
-    let cy = r.top() + r.height() * 0.46;
-    let w = r.width() * scale;
-    let h = r.height() * scale;
-    match object {
-        1 => {
-            let lens_w = w * 0.28;
-            let lens_h = h * 0.14;
-            let gap = w * 0.045;
-            let left = egui::Rect::from_center_size(
-                egui::pos2(cx - lens_w - gap, cy),
-                egui::vec2(lens_w, lens_h),
-            );
-            let right = egui::Rect::from_center_size(
-                egui::pos2(cx + lens_w + gap, cy),
-                egui::vec2(lens_w, lens_h),
-            );
-            painter.rect_stroke(left, 8.0, egui::Stroke::new(3.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
-            painter.rect_stroke(right, 8.0, egui::Stroke::new(3.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
-            painter.line_segment([egui::pos2(left.right(), cy), egui::pos2(right.left(), cy)], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([egui::pos2(left.left(), cy), egui::pos2(left.left() - w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([egui::pos2(right.right(), cy), egui::pos2(right.right() + w * 0.08, cy - h * 0.04)], egui::Stroke::new(3.0, egui::Color32::WHITE));
-        }
-        2 => {
-            let base_y = r.top() - h * 0.05;
-            let pts = [
-                egui::pos2(cx - w * 0.34, base_y),
-                egui::pos2(cx - w * 0.18, base_y - h * 0.22),
-                egui::pos2(cx - w * 0.03, base_y),
-                egui::pos2(cx + w * 0.08, base_y - h * 0.30),
-                egui::pos2(cx + w * 0.22, base_y),
-                egui::pos2(cx + w * 0.38, base_y - h * 0.16),
-                egui::pos2(cx + w * 0.42, base_y),
-            ];
-            for pair in pts.windows(2) {
-                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(4.0, egui::Color32::WHITE));
-            }
-            painter.line_segment([pts[0], pts[6]], egui::Stroke::new(4.0, egui::Color32::WHITE));
-        }
-        3 => {
-            let depth = w * 0.10;
-            let top = egui::pos2(cx, cy - h * 0.20);
-            let left = egui::pos2(cx - w * 0.24, cy - h * 0.08);
-            let right = egui::pos2(cx + w * 0.24, cy - h * 0.08);
-            let bottom = egui::pos2(cx, cy + h * 0.22);
-            painter.line_segment([top, left], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([top, right], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([left, bottom], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            painter.line_segment([right, bottom], egui::Stroke::new(3.0, egui::Color32::WHITE));
-            let o = egui::vec2(depth, -depth);
-            for (a, b) in [(top, left), (top, right), (left, bottom), (right, bottom)] {
-                painter.line_segment([a + o, b + o], egui::Stroke::new(2.0, egui::Color32::WHITE));
-            }
-            for p in [top, left, right, bottom] {
-                painter.line_segment([p, p + o], egui::Stroke::new(2.0, egui::Color32::WHITE));
-            }
-        }
-        _ => {}
+fn draw_line(image: &mut RgbImage, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: image::Rgb<u8>) {
+    let dx = (x1 - x0).abs(); let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs(); let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as u32) < image.width() && (y0 as u32) < image.height() { image.put_pixel(x0 as u32, y0 as u32, color); }
+        if x0 == x1 && y0 == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x0 += sx; }
+        if e2 <= dx { err += dx; y0 += sy; }
     }
-}
-
-fn auto_tune(src: &RgbImage) -> Tuning {
-    let mut sum = 0.0f64;
-    let mut r_sum = 0.0f64;
-    let mut b_sum = 0.0f64;
-    let mut count = 0u64;
-    for p in src.as_raw().chunks_exact(3) {
-        let r = p[0] as f64 / 255.0;
-        let g = p[1] as f64 / 255.0;
-        let b = p[2] as f64 / 255.0;
-        sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        r_sum += r;
-        b_sum += b;
-        count += 1;
-    }
-    if count == 0 { return Tuning::default(); }
-    let mean = (sum / count as f64) as f32;
-    let r_mean = (r_sum / count as f64) as f32;
-    let b_mean = (b_sum / count as f64) as f32;
-    Tuning {
-        exposure: ((0.46 - mean) * 2.0).clamp(-0.7, 0.7),
-        contrast: (1.10 + (0.46 - mean).abs() * 0.35).clamp(0.95, 1.25),
-        saturation: 1.04,
-        sharpness: 0.30,
-        denoise: 0.12,
-        warmth: ((r_mean - b_mean) * -0.8).clamp(-0.25, 0.25),
-        highlight_recovery: 0.28,
-        shadow_lift: ((0.40 - mean) * 0.30).clamp(0.02, 0.16),
-    }
-}
-
-fn enhance(src: &RgbImage, t: &Tuning) -> RgbImage {
-    let width = src.width() as usize;
-    let height = src.height() as usize;
-    let mut out = src.clone();
-    let input = src.as_raw();
-    let output = out.as_mut();
-    let exposure = 2.0_f32.powf(t.exposure);
-    output.par_chunks_mut(3).enumerate().for_each(|(i, p)| {
-        let j = i * 3;
-        let mut r = input[j] as f32 / 255.0 * exposure;
-        let mut g = input[j + 1] as f32 / 255.0 * exposure;
-        let mut b = input[j + 2] as f32 / 255.0 * exposure;
-        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        let shadow = (1.0 - lum).powi(2) * t.shadow_lift;
-        let highlight = lum.powi(2) * t.highlight_recovery;
-        r += shadow - highlight * r * 0.45;
-        g += shadow - highlight * g * 0.45;
-        b += shadow - highlight * b * 0.45;
-        r = (r - 0.5) * t.contrast + 0.5 + t.warmth * 0.06;
-        g = (g - 0.5) * t.contrast + 0.5;
-        b = (b - 0.5) * t.contrast + 0.5 - t.warmth * 0.06;
-        let lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        r = lum2 + (r - lum2) * t.saturation;
-        g = lum2 + (g - lum2) * t.saturation;
-        b = lum2 + (b - lum2) * t.saturation;
-        p[0] = (r.clamp(0.0, 1.0) * 255.0) as u8;
-        p[1] = (g.clamp(0.0, 1.0) * 255.0) as u8;
-        p[2] = (b.clamp(0.0, 1.0) * 255.0) as u8;
-    });
-    if width >= 3 && height >= 3 && (t.sharpness > 0.0 || t.denoise > 0.0) {
-        let original = out.clone();
-        let src_buf = original.as_raw();
-        out.as_mut().par_chunks_mut(3).enumerate().for_each(|(i, p)| {
-            let x = i % width;
-            let y = i / width;
-            if x == 0 || y == 0 || x + 1 >= width || y + 1 >= height { return; }
-            let idx = (y * width + x) * 3;
-            let north = idx - width * 3;
-            let south = idx + width * 3;
-            let west = idx - 3;
-            let east = idx + 3;
-            for k in 0..3 {
-                let center = src_buf[idx + k] as f32;
-                let avg = (src_buf[north + k] as f32 + src_buf[south + k] as f32 + src_buf[west + k] as f32 + src_buf[east + k] as f32) * 0.25;
-                let detail = center - avg;
-                let denoised = center * (1.0 - t.denoise) + avg * t.denoise;
-                p[k] = (denoised + detail * t.sharpness).clamp(0.0, 255.0) as u8;
-            }
-        });
-    }
-    out
 }
 
 fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Result<()> {
@@ -653,14 +677,13 @@ fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Re
 
     let requested =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-    let mut selected = available[0].0.clone();
+    let selected = available[0].0.clone();
     let mut camera = Camera::new(selected.clone(), requested)?;
     camera.open_stream()?;
 
     loop {
         if let Ok(CameraCommand::Select(new_index)) = cmd_rx.try_recv() {
             camera.stop_stream().ok();
-            selected = new_index.clone();
             match Camera::new(new_index, RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)) {
                 Ok(mut new_camera) => match new_camera.open_stream() {
                     Ok(()) => camera = new_camera,

@@ -1,0 +1,9 @@
+LIBRARY "4KRustCameraVirtualCamera"
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
+    DllRegisterServer PRIVATE
+    DllUnregisterServer PRIVATE
+    Check4KRustCameraSupport
+    Register4KRustCamera
+    Unregister4KRustCamera
