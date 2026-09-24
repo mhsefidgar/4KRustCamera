@@ -7,10 +7,15 @@ use nokhwa::{
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
     Camera,
 };
-use rayon::prelude::*;
 use std::{path::PathBuf, thread, time::{Duration, Instant}};
+
+mod ar;
+mod image_pipeline;
+mod nextface;
+use ar::FaceTrack;
+use image_pipeline::{auto_tune, enhance, Tuning};
+use nextface::{FaceMesh, HeadPose};
 #[cfg(windows)] mod virtual_camera;
-use mediapipe::{FaceLandmarker, Image as MpImage, ModelSource, Timestamp};
 
 #[derive(Clone, Debug)]
 struct Tuning {
@@ -45,22 +50,6 @@ struct FramePair {
     capture_ms: f32,
     process_ms: f32,
 }
-
-#[derive(Clone, Debug)]
-struct FaceMesh {
-    vertices: Vec<[f32; 3]>,
-    faces: Vec<[usize; 3]>,
-}
-
-#[derive(Clone, Debug)]
-struct FaceTrack {
-    bbox: (f32, f32, f32, f32),
-    landmarks: Vec<(f32, f32, f32)>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct HeadPose { yaw: f32, pitch: f32, roll: f32, scale: f32 }
-
 
 enum CameraEvent {
     Cameras(Vec<(CameraIndex, String)>),
@@ -113,7 +102,7 @@ impl CameraApp {
     fn new(rx: Receiver<CameraEvent>, camera_tx: Sender<CameraCommand>) -> Self {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
         let (worker_tx, ar_rx) = bounded::<(Vec<FaceTrack>, String)>(2);
-        thread::spawn(move || face_ai_worker(worker_rx, worker_tx));
+        ar::spawn_worker(worker_rx, worker_tx);
         let (nextface_tx, nextface_rx) = bounded::<String>(2);
         Self {
             rx,
@@ -548,7 +537,7 @@ impl eframe::App for CameraApp {
                             for &(lx, ly, _lz) in &track.landmarks {
                                 painter.circle_filled(rect.min + egui::vec2(lx * enhanced.size_vec2().x * sx, ly * enhanced.size_vec2().y * sy), 1.5, egui::Color32::LIGHT_GREEN);
                             }
-                            if let Some(mesh) = &self.nextface_mesh { if let Some(track) = self.face_tracks.first() { self.mesh_pose = Some(estimate_head_pose(track)); } draw_face_mesh_wireframe(&painter, r, mesh, self.mesh_pose.unwrap_or_default()); }
+                            if let Some(mesh) = &self.nextface_mesh { if let Some(track) = self.face_tracks.first() { self.mesh_pose = Some(nextface::estimate_head_pose(track)); } nextface::draw_wireframe(&painter, r, mesh, self.mesh_pose.unwrap_or_default()); }
                         }
                     }
                 }
@@ -567,263 +556,6 @@ impl eframe::App for CameraApp {
     }
 }
 
-
-fn face_ai_worker(rx: Receiver<RgbImage>, tx: Sender<(Vec<FaceTrack>, String)>) {
-    let model = face_landmarker_model_path();
-    if !model.exists() {
-        let _ = tx.send((Vec::new(), "AR: downloading Face Landmarker model…".to_owned()));
-        if let Err(e) = download_face_landmarker_model(&model) {
-            let _ = tx.send((Vec::new(), format!("AR unavailable: {e}")));
-            return;
-        }
-    }
-    let mut landmarker = match FaceLandmarker::builder(ModelSource::path(&model))
-        .num_faces(std::num::NonZeroU32::new(4).expect("non-zero"))
-        .min_face_detection_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
-        .min_face_presence_confidence(mediapipe::Confidence::new(0.5).expect("valid confidence"))
-        .min_tracking_confidence(mediapipe::IouThreshold::new(0.5).expect("valid IoU threshold"))
-        .output_blendshapes(true)
-        .output_transformation_matrixes(true)
-        .build_for_video()
-    {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = tx.send((Vec::new(), format!("AR Face Landmarker load failed: {e}")));
-            return;
-        }
-    };
-    let _ = tx.send((Vec::new(), "AR ready · dense face tracking".to_owned()));
-    let mut timestamp_ms = 0i64;
-    while let Ok(src) = rx.recv() {
-        let max_w = 640u32;
-        let small = if src.width() > max_w {
-            let h = ((src.height() as f32) * max_w as f32 / src.width() as f32) as u32;
-            image::imageops::resize(&src, max_w, h.max(1), image::imageops::FilterType::Triangle)
-        } else { src.clone() };
-        let temp = std::env::temp_dir().join("4k-rust-camera-ar.png");
-        if let Err(e) = small.save(&temp) {
-            let _ = tx.try_send((Vec::new(), format!("AR frame preparation failed: {e}")));
-            continue;
-        }
-        timestamp_ms += 33;
-        let result: Result<Vec<FaceTrack>> = (|| {
-            let image = MpImage::from_file(&temp)?;
-            let result = landmarker.detect_for_video(&image, Timestamp::from_millis(timestamp_ms))?;
-            let sx = src.width() as f32 / small.width().max(1) as f32;
-            let sy = src.height() as f32 / small.height().max(1) as f32;
-            Ok(result.landmarks.into_iter().map(|face| {
-                let points: Vec<(f32, f32, f32)> = face.iter().map(|p| (p.point.x(), p.point.y(), p.point.z())).collect();
-                let (mut min_x, mut min_y, mut max_x, mut max_y): (f32, f32, f32, f32) = (1.0, 1.0, 0.0, 0.0);
-                for &(x,y,_) in &points { min_x=min_x.min(x); min_y=min_y.min(y); max_x=max_x.max(x); max_y=max_y.max(y); }
-                FaceTrack {
-                    bbox: (min_x * small.width() as f32 * sx, min_y * small.height() as f32 * sy,
-                           (max_x-min_x) * small.width() as f32 * sx, (max_y-min_y) * small.height() as f32 * sy),
-                    landmarks: points,
-                }
-            }).collect())
-        })();
-        let _ = std::fs::remove_file(&temp);
-        match result {
-            Ok(tracks) => {
-                let count = tracks.len();
-                let _ = tx.try_send((tracks, format!("AR active · {} face(s) · dense landmarks", count)));
-            }
-            Err(e) => { let _ = tx.try_send((Vec::new(), format!("AR inference failed: {e}"))); }
-        }
-    }
-}
-
-fn download_face_landmarker_model(path: &PathBuf) -> Result<()> {
-    const URL: &str = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
-    let mut response = ureq::get(URL).call().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
-    let bytes = response.body_mut().with_config().limit(30 * 1024 * 1024).read_to_vec().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
-    if bytes.len() < 1_000_000 { anyhow::bail!("downloaded Face Landmarker model is unexpectedly small"); }
-    let temp = path.with_extension("part");
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
-}
-
-fn face_landmarker_model_path() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    p.pop(); p.push("models"); p.push("face_landmarker.task"); p
-}
-
-fn model_path() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    p.pop(); p.push("models"); p.push("blaze_face_short_range.tflite"); p
-}
-fn find_nextface_mesh(dir: &std::path::Path) -> Option<PathBuf> {
-    let mut found = None;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("obj") {
-                if p.file_name().and_then(|s| s.to_str()).map(|s| s.starts_with("mesh")).unwrap_or(false) {
-                    found = Some(p);
-                    break;
-                }
-            }
-        }
-    }
-    found
-}
-
-fn load_obj_mesh(path: &std::path::Path) -> Result<FaceMesh> {
-    let text = std::fs::read_to_string(path)?;
-    let mut vertices = Vec::new();
-    let mut faces = Vec::new();
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        match it.next() {
-            Some("v") => {
-                let x: f32 = it.next().unwrap_or("0").parse()?;
-                let y: f32 = it.next().unwrap_or("0").parse()?;
-                let z: f32 = it.next().unwrap_or("0").parse()?;
-                vertices.push([x,y,z]);
-            }
-            Some("f") => {
-                let mut idx = [0usize; 3];
-                let mut ok = true;
-                for i in 0..3 {
-                    let token = it.next().unwrap_or("");
-                    let raw = token.split('/').next().unwrap_or("");
-                    let n: usize = match raw.parse() { Ok(v) if v > 0 => v - 1, _ => { ok=false; break; } };
-                    idx[i]=n;
-                }
-                if ok && idx.iter().all(|&i| i < vertices.len()) { faces.push(idx); }
-            }
-            _ => {}
-        }
-    }
-    if vertices.is_empty() || faces.is_empty() { anyhow::bail!("OBJ contains no triangle mesh"); }
-    Ok(FaceMesh { vertices, faces })
-}
-
-fn estimate_head_pose(track: &FaceTrack) -> HeadPose {
-    if track.landmarks.len() < 10 { return HeadPose::default(); }
-    let p = |i: usize| track.landmarks.get(i).copied().unwrap_or((0.5,0.5,0.0));
-    // MediaPipe normalized landmarks: eyes and mouth provide a stable screen-space head orientation.
-    let l=p(33); let r=p(263); let nose=p(1); let mouth=p(13);
-    let yaw=((nose.0-0.5)*2.0).clamp(-1.0,1.0);
-    let roll=(r.1-l.1).atan2(r.0-l.0);
-    let eye_y=(l.1+r.1)*0.5;
-    let pitch=((mouth.1-nose.1)-(eye_y-nose.1)).clamp(-0.8,0.8);
-    let scale=(track.bbox.2.max(1e-3)).sqrt();
-    HeadPose { yaw: yaw*0.9, pitch:pitch*0.8, roll:-roll, scale }
-}
-
-fn draw_face_mesh_wireframe(painter: &egui::Painter, rect: egui::Rect, mesh: &FaceMesh, pose: HeadPose) {
-    if mesh.vertices.is_empty() { return; }
-    let mut min = [f32::MAX; 3];
-    let mut max = [f32::MIN; 3];
-    for v in &mesh.vertices { for k in 0..3 { min[k]=min[k].min(v[k]); max[k]=max[k].max(v[k]); } }
-    let center = [(min[0]+max[0])*0.5,(min[1]+max[1])*0.5,(min[2]+max[2])*0.5];
-    let scale = 0.88 / (max[0]-min[0]).max(max[1]-min[1]).max(1e-4);
-    let mut projected = Vec::with_capacity(mesh.vertices.len());
-    for v in &mesh.vertices {
-        let mut x=(v[0]-center[0])*scale;
-        let mut y=(v[1]-center[1])*scale;
-        let mut z=(v[2]-center[2])*scale;
-        let (sy,cy)=pose.yaw.sin_cos(); let (sp,cp)=pose.pitch.sin_cos(); let (sr,cr)=pose.roll.sin_cos();
-        let x1=cy*x+sy*z; let z1=-sy*x+cy*z;
-        let y1=cp*y-sp*z1; let z2=sp*y+cp*z1;
-        x=cr*x1-sr*y1; y=sr*x1+cr*y1; z=z2;
-        // Simple perspective projection of the actual reconstructed 3D vertices.
-        let depth=1.0/(1.0+(z*0.35));
-        projected.push(egui::pos2(rect.center().x+x*rect.width()*0.5*depth, rect.center().y-y*rect.height()*0.5*depth));
-    }
-    let stroke=egui::Stroke::new(0.7, egui::Color32::LIGHT_GREEN);
-    for f in &mesh.faces {
-        painter.line_segment([projected[f[0]],projected[f[1]]],stroke);
-        painter.line_segment([projected[f[1]],projected[f[2]]],stroke);
-        painter.line_segment([projected[f[2]],projected[f[0]]],stroke);
-    }
-}
-
-fn auto_tune(src: &RgbImage) -> Tuning {
-    let mut sum = 0.0f64;
-    let mut r_sum = 0.0f64;
-    let mut b_sum = 0.0f64;
-    let mut count = 0u64;
-    for p in src.as_raw().chunks_exact(3) {
-        let r = p[0] as f64 / 255.0;
-        let g = p[1] as f64 / 255.0;
-        let b = p[2] as f64 / 255.0;
-        sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        r_sum += r;
-        b_sum += b;
-        count += 1;
-    }
-    if count == 0 { return Tuning::default(); }
-    let mean = (sum / count as f64) as f32;
-    let r_mean = (r_sum / count as f64) as f32;
-    let b_mean = (b_sum / count as f64) as f32;
-    Tuning {
-        exposure: ((0.46 - mean) * 2.0).clamp(-0.7, 0.7),
-        contrast: (1.10 + (0.46 - mean).abs() * 0.35).clamp(0.95, 1.25),
-        saturation: 1.04,
-        sharpness: 0.30,
-        denoise: 0.12,
-        warmth: ((r_mean - b_mean) * -0.8).clamp(-0.25, 0.25),
-        highlight_recovery: 0.28,
-        shadow_lift: ((0.40 - mean) * 0.30).clamp(0.02, 0.16),
-    }
-}
-
-fn enhance(src: &RgbImage, t: &Tuning) -> RgbImage {
-    let width = src.width() as usize;
-    let height = src.height() as usize;
-    let mut out = src.clone();
-    let input = src.as_raw();
-    let output = out.as_mut();
-    let exposure = 2.0_f32.powf(t.exposure);
-    output.par_chunks_mut(3).enumerate().for_each(|(i, p)| {
-        let j = i * 3;
-        let mut r = input[j] as f32 / 255.0 * exposure;
-        let mut g = input[j + 1] as f32 / 255.0 * exposure;
-        let mut b = input[j + 2] as f32 / 255.0 * exposure;
-        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        let shadow = (1.0 - lum).powi(2) * t.shadow_lift;
-        let highlight = lum.powi(2) * t.highlight_recovery;
-        r += shadow - highlight * r * 0.45;
-        g += shadow - highlight * g * 0.45;
-        b += shadow - highlight * b * 0.45;
-        r = (r - 0.5) * t.contrast + 0.5 + t.warmth * 0.06;
-        g = (g - 0.5) * t.contrast + 0.5;
-        b = (b - 0.5) * t.contrast + 0.5 - t.warmth * 0.06;
-        let lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        r = lum2 + (r - lum2) * t.saturation;
-        g = lum2 + (g - lum2) * t.saturation;
-        b = lum2 + (b - lum2) * t.saturation;
-        p[0] = (r.clamp(0.0, 1.0) * 255.0) as u8;
-        p[1] = (g.clamp(0.0, 1.0) * 255.0) as u8;
-        p[2] = (b.clamp(0.0, 1.0) * 255.0) as u8;
-    });
-    if width >= 3 && height >= 3 && (t.sharpness > 0.0 || t.denoise > 0.0) {
-        let original = out.clone();
-        let src_buf = original.as_raw();
-        out.as_mut().par_chunks_mut(3).enumerate().for_each(|(i, p)| {
-            let x = i % width;
-            let y = i / width;
-            if x == 0 || y == 0 || x + 1 >= width || y + 1 >= height { return; }
-            let idx = (y * width + x) * 3;
-            let north = idx - width * 3;
-            let south = idx + width * 3;
-            let west = idx - 3;
-            let east = idx + 3;
-            for k in 0..3 {
-                let center = src_buf[idx + k] as f32;
-                let avg = (src_buf[north + k] as f32 + src_buf[south + k] as f32 + src_buf[west + k] as f32 + src_buf[east + k] as f32) * 0.25;
-                let detail = center - avg;
-                let denoised = center * (1.0 - t.denoise) + avg * t.denoise;
-                p[k] = (denoised + detail * t.sharpness).clamp(0.0, 255.0) as u8;
-            }
-        });
-    }
-    out
-}
 
 fn camera_thread(tx: Sender<CameraEvent>, cmd_rx: Receiver<CameraCommand>) -> Result<()> {
     let cameras = nokhwa::query(nokhwa::native_api_backend().ok_or_else(|| anyhow::anyhow!("No camera backend is available on this system."))?)?;
