@@ -12,6 +12,7 @@ use windows_sys::Win32::{
         Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
     },
     Security::{SECURITY_ATTRIBUTES, Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1}},
+    UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW},
 };
 
 const WIDTH: u32 = 3840;
@@ -140,6 +141,56 @@ pub fn check_registration_support() -> Result<()> {
         let hr = f();
         FreeLibrary(module);
         if hr < 0 { anyhow::bail!("virtual-camera API unsupported/unavailable: HRESULT 0x{:08X}", hr as u32); }
+    }
+    Ok(())
+}
+
+fn elevate_regsvr32(register: bool) -> Result<()> {
+    let mut dll = std::env::current_exe().context("current executable path")?;
+    dll.set_file_name("4KRustCameraVirtualCamera.dll");
+    if !dll.is_file() {
+        anyhow::bail!("virtual-camera DLL not found: {}", dll.display());
+    }
+    let system = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let regsvr = system.join("System32").join("regsvr32.exe");
+    let verb: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = regsvr.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let args_text = if register {
+        format!("/s \"{}\"", dll.display())
+    } else {
+        format!("/s /u \"{}\"", dll.display())
+    };
+    let args: Vec<u16> = args_text.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = file.as_ptr();
+        info.lpParameters = args.as_ptr();
+        info.nShow = 0;
+        if ShellExecuteExW(&mut info) == 0 {
+            anyhow::bail!("elevated COM registration was not started: {}", GetLastError());
+        }
+        if info.hProcess.is_null() {
+            anyhow::bail!("elevated COM registration returned no process handle");
+        }
+        let wait = WaitForSingleObject(info.hProcess, 30_000);
+        if wait != WAIT_OBJECT_0 {
+            CloseHandle(info.hProcess);
+            anyhow::bail!("elevated COM registration timed out");
+        }
+        let mut exit_code = 1u32;
+        if GetExitCodeProcess(info.hProcess, &mut exit_code) == 0 {
+            let e = GetLastError();
+            CloseHandle(info.hProcess);
+            anyhow::bail!("could not read elevated registration exit code: {}", e);
+        }
+        CloseHandle(info.hProcess);
+        if exit_code != 0 {
+            anyhow::bail!("elevated regsvr32 failed with exit code {}", exit_code);
+        }
     }
     Ok(())
 }
