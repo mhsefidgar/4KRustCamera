@@ -15,7 +15,7 @@ mediapipe = "0.1.0"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 rayon = "1.11"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Performance", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_Authorization", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Performance", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_Authorization", "Win32_UI_Shell", "Win32_System_Registry"] }
 
 [profile.release]
 opt-level = 3
