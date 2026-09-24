@@ -76,7 +76,7 @@ impl CameraApp {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
         let (worker_tx, ar_rx) = bounded::<(Vec<FaceTrack>, String)>(2);
         ar::spawn_worker(worker_rx, worker_tx);
-        let (nextface_tx, nextface_rx) = bounded::<String>(2);
+        let (_nextface_tx, nextface_rx) = bounded::<String>(2);
         Self {
             rx,
             camera_tx,
@@ -176,7 +176,7 @@ impl CameraApp {
                 self.last_auto_tune = Instant::now();
             }
             let start = Instant::now();
-            let mut enhanced = enhance(&raw, &self.tuning);
+            let enhanced = enhance(&raw, &self.tuning);
             #[cfg(windows)]
             if self.virtual_webcam {
                 if let Some(publisher) = &mut self.virtual_camera_publisher {
@@ -391,7 +391,7 @@ impl eframe::App for CameraApp {
                             match pair.raw.save(&input) {
                                 Ok(()) => {
                                     self.nextface_status = format!("Starting NextFace… output: {}", output.display());
-                                    let tx = nextface_tx.clone();
+                                    let tx = _nextface_tx.clone();
                                     thread::spawn(move || {
                                         let optimizer = root.join("optimizer.py");
                                         if !optimizer.exists() {
