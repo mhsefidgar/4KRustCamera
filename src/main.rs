@@ -421,7 +421,7 @@ impl eframe::App for CameraApp {
                     });
                     if ui.button("Use selected sample").clicked() {
                         if let Some((name, _)) = self.face_samples.get(self.selected_face_sample) {
-                            let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("assets").join("face-samples").join(format!("{}.jpg", name.to_lowercase().replace(" ", "-").replace("—", "-").replace(|c: char| !c.is_ascii_alphanumeric() && c != "-", "")));
+                            let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("assets").join("face-samples").join(format!("{}.jpg", name.to_lowercase().replace(" ", "-").replace("—", "-").replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "")));
                             if path.is_file() {
                                 self.nextface_status = format!("Selected sample: {}", path.display());
                             } else {
