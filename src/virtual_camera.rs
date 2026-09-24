@@ -195,7 +195,10 @@ fn elevate_regsvr32(register: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn call_registration(register: bool) -> Result<()> {\n    // The FrameServer loads the media source out-of-process, so its COM class\n    // must be registered system-wide. Perform that privileged operation first.\n    elevate_regsvr32(register)?;
+pub fn call_registration(register: bool) -> Result<()> {
+    // The FrameServer loads the media source out-of-process, so its COM class
+    // must be registered system-wide. Perform that privileged operation first.
+    elevate_regsvr32(register)?;
     let mut path = std::env::current_exe().context("current executable path")?;
     path.set_file_name("4KRustCameraVirtualCamera.dll");
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
