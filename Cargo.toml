@@ -16,7 +16,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 rayon = "1.11"
 libloading = "0.8"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [profile.release]
 opt-level = 3

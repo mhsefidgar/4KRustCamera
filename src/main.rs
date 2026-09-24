@@ -8,7 +8,9 @@ use nokhwa::{
     Camera,
 };
 use rayon::prelude::*;
-use std::{path::PathBuf, thread, time::{Duration, Instant}};
+use std::{path::PathBuf, thread, time::{Duration, Instant}, sync::Arc};
+mod virtual_camera;
+use virtual_camera::VirtualPublisher;
 use mediapipe::{FaceDetector, Image as MpImage, ModelSource, IouThreshold};
 
 #[derive(Clone, Debug)]
@@ -82,6 +84,7 @@ struct CameraApp {
     ar_status: String,
     ar_tx: Sender<RgbImage>,
     ar_rx: Receiver<(Vec<(f32, f32, f32, f32, f32)>, String)>,
+    virtual_publisher: Arc<VirtualPublisher>,
 }
 
 impl CameraApp {
@@ -116,6 +119,7 @@ impl CameraApp {
             ar_status: "AR off".to_owned(),
             ar_tx,
             ar_rx,
+            virtual_publisher: Arc::new(VirtualPublisher::new()),
         }
     }
 
@@ -175,6 +179,7 @@ impl CameraApp {
             let start = Instant::now();
             let enhanced = enhance(&raw, &self.tuning);
             let process_ms = start.elapsed().as_secs_f32() * 1000.0;
+            self.virtual_publisher.publish(&enhanced);
             if self.ar_enabled {
                 let _ = self.ar_tx.try_send(raw.clone());
             } else {
@@ -334,7 +339,7 @@ impl eframe::App for CameraApp {
                 if ui.button("Register 4K Rust Virtual Camera").clicked() {
                     self.error = Some("Virtual-camera registration still needs the Media Foundation custom media-source DLL. MFCreateVirtualCamera can register a source, but Windows will not invent the frame-producing COM component for this app.".to_owned());
                 }
-                ui.small("The control is active so the state is explicit. The remaining work is the Windows Media Foundation source component that supplies processed frames.");
+                ui.small("Enhanced frames are published through the Media Foundation source.");
 
                 ui.separator();
                 ui.collapsing("Performance", |ui| {
