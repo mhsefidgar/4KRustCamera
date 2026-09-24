@@ -70,6 +70,9 @@ struct CameraApp {
     nextface_status: String,
     nextface_tx: Sender<String>,
     nextface_rx: Receiver<String>,
+    face_samples: Vec<(String, String)>,
+    selected_face_sample: usize,
+    face_sample_status: String,
 }
 
 impl CameraApp {
@@ -114,6 +117,13 @@ impl CameraApp {
             nextface_status: "NextFace idle".to_owned(),
             nextface_tx,
             nextface_rx,
+            face_samples: vec![
+                ("Historic portrait — man".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/Portrait_of_a_man,_facing_front,_image_framed_by_gold_and_red_decorative_motif_LCCN2016653262.jpg".to_owned()),
+                ("Historic portrait — woman".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/African_American_woman,_head-and-shoulders_portrait,_facing_front_LCCN99472177.jpg".to_owned()),
+                ("Historic portrait — front view".to_owned(), "https://commons.wikimedia.org/wiki/Special:Redirect/file/Portrait_of_an_unidentified_man,_full-length,_standing,_facing_front_LCCN2015652128.jpg".to_owned()),
+            ],
+            selected_face_sample: 0,
+            face_sample_status: "Samples are downloaded on demand.".to_owned(),
         }
     }
 
@@ -432,6 +442,43 @@ impl eframe::App for CameraApp {
                     }
                     ui.label(format!("Status: {}", self.nextface_status));
                     ui.small("NextFace requires its Python environment plus the Basel morphable/albedo model files described by the upstream project.");
+                });
+
+                ui.separator();
+                ui.collapsing("Face Samples · add to reconstruction", |ui| {
+                    ui.small("Download public-domain sample portraits for testing the face-reconstruction pipeline. These are source images, not live 2D stickers.");
+                    let mut requested = None;
+                    egui::ComboBox::from_id_salt("face_sample_selector")
+                        .selected_text(self.face_samples.get(self.selected_face_sample).map(|x| x.0.as_str()).unwrap_or("No sample"))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for (i, (name, _)) in self.face_samples.iter().enumerate() {
+                                if ui.selectable_label(i == self.selected_face_sample, name).clicked() { requested = Some(i); }
+                            }
+                        });
+                    if let Some(i) = requested { self.selected_face_sample = i; }
+                    if ui.button("Download selected sample").clicked() {
+                        if let Some((name, url)) = self.face_samples.get(self.selected_face_sample).cloned() {
+                            let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")) .join("assets").join("face-samples");
+                            let safe = name.to_lowercase().replace(' ', "-").replace('—', "-").replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "");
+                            let path = dir.join(format!("{safe}.jpg"));
+                            self.face_sample_status = format!("Downloading {name}…");
+                            let status_tx = self.nextface_tx.clone();
+                            thread::spawn(move || {
+                                let result = (|| -> Result<()> {
+                                    std::fs::create_dir_all(&dir)?;
+                                    let mut response = ureq::get(&url).call().map_err(|e| anyhow::anyhow!("sample download failed: {e}"))?;
+                                    let bytes = response.body_mut().with_config().limit(12 * 1024 * 1024).read_to_vec().map_err(|e| anyhow::anyhow!("sample download failed: {e}"))?;
+                                    if bytes.len() < 10_000 { anyhow::bail!("downloaded sample is unexpectedly small"); }
+                                    std::fs::write(&path, bytes)?;
+                                    Ok(())
+                                })();
+                                let _ = status_tx.send(match result { Ok(()) => format!("Sample ready: {}", path.display()), Err(e) => format!("Sample download failed: {e}") });
+                            });
+                        }
+                    }
+                    ui.label(format!("Status: {}", self.face_sample_status));
+                    ui.small("The samples are public-domain historical portraits from Wikimedia Commons and are intended only as reconstruction test inputs.");
                 });
 
                 ui.separator();
