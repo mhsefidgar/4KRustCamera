@@ -17,3 +17,47 @@ fn face_ai_worker(rx:Receiver<RgbImage>,tx:Sender<(Vec<FaceTrack>,String)>){
 }
 fn download_face_landmarker_model(path:&PathBuf)->Result<()>{const URL:&str="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";if let Some(parent)=path.parent(){std::fs::create_dir_all(parent)?;}let mut response=ureq::get(URL).call().map_err(|e|anyhow::anyhow!("model download failed: {e}"))?;let bytes=response.body_mut().with_config().limit(30*1024*1024).read_to_vec().map_err(|e|anyhow::anyhow!("model download failed: {e}"))?;if bytes.len()<1_000_000{anyhow::bail!("downloaded Face Landmarker model is unexpectedly small");}let temp=path.with_extension("part");std::fs::write(&temp,bytes)?;std::fs::rename(temp,path)?;Ok(())}
 fn face_landmarker_model_path()->PathBuf{let mut p=std::env::current_exe().unwrap_or_else(|_|PathBuf::from("."));p.pop();p.push("models");p.push("face_landmarker.task");p}
+
+
+pub fn draw_tracking_overlay(image: &mut RgbImage, tracks: &[FaceTrack]) {
+    for track in tracks {
+        let (x, y, w, h) = track.bbox;
+        let color = image::Rgb([0, 255, 0]);
+        draw_rect(image, x.round() as i32, y.round() as i32, w.round() as i32, h.round() as i32, color);
+        for &(lx, ly, _) in &track.landmarks {
+            let px = (lx * image.width() as f32).round() as i32;
+            let py = (ly * image.height() as f32).round() as i32;
+            draw_cross(image, px, py, color);
+        }
+    }
+}
+
+fn draw_rect(image: &mut RgbImage, x: i32, y: i32, w: i32, h: i32, color: image::Rgb<u8>) {
+    if w <= 0 || h <= 0 { return; }
+    draw_line(image, x, y, x + w, y, color);
+    draw_line(image, x, y + h, x + w, y + h, color);
+    draw_line(image, x, y, x, y + h, color);
+    draw_line(image, x + w, y, x + w, y + h, color);
+}
+
+fn draw_cross(image: &mut RgbImage, x: i32, y: i32, color: image::Rgb<u8>) {
+    draw_line(image, x - 2, y, x + 2, y, color);
+    draw_line(image, x, y - 2, x, y + 2, color);
+}
+
+fn draw_line(image: &mut RgbImage, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: image::Rgb<u8>) {
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as u32) < image.width() && (y0 as u32) < image.height() {
+            image.put_pixel(x0 as u32, y0 as u32, color);
+        }
+        if x0 == x1 && y0 == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x0 += sx; }
+        if e2 <= dx { err += dx; y0 += sy; }
+    }
+}
