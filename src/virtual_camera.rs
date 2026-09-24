@@ -52,8 +52,7 @@ impl VirtualCameraPublisher {
         let bytes = size_of::<FrameRing>() as u32;
         let mut sd = ptr::null_mut();
         let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;IU)".encode_utf16().chain(std::iter::once(0)).collect();
-        let mut sd_ok = false;
-        unsafe { sd_ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, ptr::null_mut()) != 0; }
+        let sd_ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, ptr::null_mut()) != 0 };
         if !sd_ok { anyhow::bail!("could not create virtual-camera shared-memory security descriptor: {}", unsafe { GetLastError() }); }
         let mut sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd as *mut _, bInheritHandle: 0 };
         let mapping = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, &mut sa, PAGE_READWRITE, 0, bytes, MAPPING.as_ptr()) };
