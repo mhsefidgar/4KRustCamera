@@ -287,6 +287,21 @@ static HRESULT RegisterVirtualCameraInternal(bool remove) {
         }
 
         hr = camera->Start(nullptr);
+        if (SUCCEEDED(hr)) {
+            // Validate that the registered source can actually be activated before
+            // reporting success. This catches COM registration/dependency failures
+            // immediately instead of leaving a camera that appears but cannot stream.
+            IMFMediaSource* mediaSource = nullptr;
+            HRESULT activationHr = camera->GetMediaSource(&mediaSource);
+            SafeRelease(&mediaSource);
+            if (FAILED(activationHr)) hr = activationHr;
+        }
+        if (FAILED(hr)) {
+            // Do not leave a stale virtual-camera registration behind after a
+            // failed source activation.
+            camera->Remove();
+            DllUnregisterServer();
+        }
         if (camera) camera->Release();
         MFShutdown();
         return hr;
