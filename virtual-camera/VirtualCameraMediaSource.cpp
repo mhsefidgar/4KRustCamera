@@ -298,7 +298,8 @@ static HRESULT RegisterVirtualCameraInternal(bool remove) {
             // reporting success. This catches COM registration/dependency failures
             // immediately instead of leaving a camera that appears but cannot stream.
             IMFMediaSource* mediaSource = nullptr;
-            HRESULT activationHr = camera->GetMediaSource(&mediaSource);\n            DebugHr(L"IMFVirtualCamera::GetMediaSource", activationHr);
+            HRESULT activationHr = camera->GetMediaSource(&mediaSource);
+            DebugHr(L"IMFVirtualCamera::GetMediaSource", activationHr);
             SafeRelease(&mediaSource);
             if (FAILED(activationHr)) hr = activationHr;
         }
