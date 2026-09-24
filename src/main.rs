@@ -94,6 +94,10 @@ struct CameraApp {
     virtual_camera_publisher: Option<virtual_camera::VirtualCameraPublisher>,
     ar_tx: Sender<RgbImage>,
     ar_rx: Receiver<(Vec<FaceTrack>, String)>,
+    nextface_root: String,
+    nextface_python: String,
+    nextface_status: String,
+    nextface_rx: Receiver<String>,
 }
 
 impl CameraApp {
@@ -101,6 +105,7 @@ impl CameraApp {
         let (ar_tx, worker_rx) = bounded::<RgbImage>(1);
         let (worker_tx, ar_rx) = bounded::<(Vec<FaceTrack>, String)>(2);
         thread::spawn(move || face_ai_worker(worker_rx, worker_tx));
+        let (nextface_tx, nextface_rx) = bounded::<String>(2);
         Self {
             rx,
             camera_tx,
@@ -132,6 +137,10 @@ impl CameraApp {
             virtual_camera_publisher: virtual_camera::VirtualCameraPublisher::open().ok(),
             ar_tx,
             ar_rx,
+            nextface_root: "NextFace".to_owned(),
+            nextface_python: if cfg!(windows) { "python".to_owned() } else { "python3".to_owned() },
+            nextface_status: "NextFace idle".to_owned(),
+            nextface_rx,
         }
     }
 
@@ -185,6 +194,9 @@ impl CameraApp {
         while let Ok((tracks, status)) = self.ar_rx.try_recv() {
             self.face_tracks = tracks;
             self.ar_status = status;
+        }
+        while let Ok(status) = self.nextface_rx.try_recv() {
+            self.nextface_status = status;
         }
 
         if let Some((raw, capture_ms)) = latest {
@@ -416,6 +428,68 @@ impl eframe::App for CameraApp {
                 });
 
                 ui.separator();
+                ui.collapsing("NextFace · high-fidelity 3D reconstruction", |ui| {
+                    ui.small("Runs NextFace on a captured RGB frame to reconstruct a textured 3D face mesh. This is an offline reconstruction backend, not a per-frame realtime effect.");
+                    ui.horizontal(|ui| {
+                        ui.label("NextFace");
+                        ui.text_edit_singleline(&mut self.nextface_root);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Python");
+                        ui.text_edit_singleline(&mut self.nextface_python);
+                    });
+                    if ui.button("Reconstruct current frame").clicked() {
+                        if let Some(pair) = &self.pair {
+                            let root = PathBuf::from(self.nextface_root.trim());
+                            let python = self.nextface_python.trim().to_owned();
+                            let input = std::env::temp_dir().join("4k-rust-camera-nextface-input.png");
+                            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                            let output = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("nextface-output").join(format!("reconstruction-{stamp}"));
+                            match pair.raw.save(&input) {
+                                Ok(()) => {
+                                    self.nextface_status = format!("Starting NextFace… output: {}", output.display());
+                                    let tx = nextface_tx.clone();
+                                    thread::spawn(move || {
+                                        let optimizer = root.join("optimizer.py");
+                                        if !optimizer.exists() {
+                                            let _ = tx.send(format!("NextFace not found: {}", optimizer.display()));
+                                            return;
+                                        }
+                                        if let Err(e) = std::fs::create_dir_all(&output) {
+                                            let _ = tx.send(format!("NextFace output directory failed: {e}"));
+                                            return;
+                                        }
+                                        let result = std::process::Command::new(&python)
+                                            .arg(&optimizer)
+                                            .arg("--input").arg(&input)
+                                            .arg("--output").arg(&output)
+                                            .current_dir(&root)
+                                            .spawn()
+                                            .and_then(|mut child| child.wait());
+                                        match result {
+                                            Ok(status) if status.success() => {
+                                                let _ = tx.send(format!("NextFace complete · mesh/output: {}", output.display()));
+                                            }
+                                            Ok(status) => {
+                                                let _ = tx.send(format!("NextFace exited with {status}"));
+                                            }
+                                            Err(e) => {
+                                                let _ = tx.send(format!("Could not start NextFace: {e}"));
+                                            }
+                                        }
+                                    });
+                                }
+                                Err(e) => self.nextface_status = format!("Could not save frame: {e}"),
+                            }
+                        } else {
+                            self.nextface_status = "Capture a frame before running reconstruction.".to_owned();
+                        }
+                    }
+                    ui.label(format!("Status: {}", self.nextface_status));
+                    ui.small("NextFace requires its Python environment plus the Basel morphable/albedo model files described by the upstream project.");
+                });
+
+                ui.separator();
                 ui.collapsing("Performance", |ui| {
                     ui.label(format!("Frames processed: {}", self.frames));
                     ui.label(format!("Last enhancement: {:.1} ms", self.last_process_ms));
@@ -429,6 +503,12 @@ impl eframe::App for CameraApp {
                 ui.label("Low-latency CPU enhancement is applied to every frame.");
                 ui.small("Frames are dropped intentionally when processing falls behind, keeping latency bounded.");
 
+                });
+
+                ui.collapsing("Face Mesh", |ui| {
+                    ui.label("Realtime MediaPipe face mesh / landmarks");
+                    ui.label(format!("{} tracked face(s), {} landmarks", self.face_tracks.len(), self.face_tracks.iter().map(|f| f.landmarks.len()).sum::<usize>()));
+                    ui.small("NextFace can reconstruct a higher-fidelity 3D face from the current RGB frame; use the NextFace panel for reconstruction.");
                 });
 
                 ui.collapsing("AI detail", |ui| {
