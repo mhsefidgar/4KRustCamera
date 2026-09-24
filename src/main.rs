@@ -52,6 +52,8 @@ struct CameraApp {
     show_stats: bool,
     ar_enabled: bool,
     virtual_webcam: bool,
+    #[cfg(windows)]
+    virtual_camera_status: String,
     last_process_ms: f32,
     auto_tune_enabled: bool,
     auto_tune_default_enabled: bool,
@@ -102,6 +104,11 @@ impl CameraApp {
             show_stats: true,
             ar_enabled: false,
             virtual_webcam: false,
+            #[cfg(windows)]
+            virtual_camera_status: match virtual_camera::check_registration_support() {
+                Ok(()) => "Virtual camera API available".to_owned(),
+                Err(e) => format!("Virtual camera unavailable: {e:#}"),
+            },
             last_process_ms: 0.0,
             auto_tune_enabled: false,
             auto_tune_default_enabled: false,
@@ -394,8 +401,8 @@ impl eframe::App for CameraApp {
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Register").clicked() {
                             match virtual_camera::call_registration(true) {
-                                Ok(()) => self.error = None,
-                                Err(e) => self.error = Some(format!("{e:#}")),
+                                Ok(()) => { self.error = None; self.virtual_camera_status = "Registered".to_owned(); }
+                                Err(e) => { self.virtual_camera_status = format!("{e:#}"); self.error = Some(format!("{e:#}")); }
                             }
                         }
                         if ui.button("Unregister").clicked() {
@@ -405,6 +412,7 @@ impl eframe::App for CameraApp {
                             }
                         }
                     });
+                    ui.label(format!("Status: {}", self.virtual_camera_status));
                     ui.small("Frames published here are the same enhanced/AR-composited frames shown in the preview.");
                 });
 
